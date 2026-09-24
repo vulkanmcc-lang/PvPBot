@@ -134,8 +134,12 @@ public class HealingController {
         boolean criticallyLow = hp <= fleeThreshold * 0.5;
         boolean lockoutGraceOver =
                 context.fleeBlockedTicks <= CORNERED_LOCKOUT_TICKS - CORNERED_LOCKOUT_GRACE_TICKS;
+        // No food or healing potions means running away can't get us any
+        // health back, so just keep fighting.
+        boolean canHeal = context.inventoryController.hasHealingSupply(botPlayer);
 
         if (!context.fleeing
+                && canHeal
                 && (context.fleeBlockedTicks <= 0 || (criticallyLow && lockoutGraceOver))
                 && hp <= fleeThreshold) {
             context.fleeBlockedTicks = 0;
@@ -209,11 +213,12 @@ public class HealingController {
 
         boolean underfed = botPlayer.getFoodLevel() < 18
                 && context.inventoryController.findFoodSlot(botPlayer) >= 0;
-        if (context.fleeing
-                && hp >= context.settings.getReturnHealthThreshold()
+        boolean healedUp = hp >= context.settings.getReturnHealthThreshold()
                 && context.healCommitTicks <= 0
+                && !underfed;
+        if (context.fleeing
+                && (healedUp || !canHeal)
                 && context.totemRecoveryTicks <= 0
-                && !underfed
                 && !stillConsuming) {
             context.fleeing = false;
             context.pearlsThisFlee = 0;

@@ -720,6 +720,19 @@ public class InventoryController {
         return ensureInHotbar(p, it -> it.getType().isEdible());
     }
 
+    // Read-only check (no hotbar shuffling): does the bot carry anything it
+    // could heal with — food or a drinkable regen/instant-health potion.
+    public boolean hasHealingSupply(Player p) {
+        PlayerInventory inv = p.getInventory();
+        for (int i = 0; i < 36; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null) continue;
+            if (it.getType().isEdible() || isHealingPotion(it)) return true;
+        }
+        ItemStack off = inv.getItemInOffHand();
+        return off != null && (off.getType().isEdible() || isHealingPotion(off));
+    }
+
     public int findGoldenAppleSlot(Player p) {
         int enchanted = ensureInHotbar(p, it -> it.getType() == Material.ENCHANTED_GOLDEN_APPLE);
         if (enchanted >= 0) return enchanted;
