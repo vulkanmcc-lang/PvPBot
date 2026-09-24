@@ -130,6 +130,22 @@ public final class NavGrid {
         }
     }
 
+    // True when every block within `margin` of (x,y,z) is inside the captured
+    // window and backed by a loaded chunk snapshot - i.e. "can't walk there"
+    // answers around this cell reflect the world, not missing data.
+    public boolean fullyLoaded(int x, int y, int z, int margin) {
+        if (y - margin < minY || y + margin + 2 > maxY) return false;
+        int cx0 = ((x - margin) >> 4) - minCx, cx1 = ((x + margin) >> 4) - minCx;
+        int cz0 = ((z - margin) >> 4) - minCz, cz1 = ((z + margin) >> 4) - minCz;
+        if (cx0 < 0 || cz0 < 0 || cx1 >= spanCx || cz1 >= spanCz) return false;
+        for (int ix = cx0; ix <= cx1; ix++) {
+            for (int iz = cz0; iz <= cz1; iz++) {
+                if (chunks[ix * spanCz + iz] == null) return false;
+            }
+        }
+        return true;
+    }
+
     public boolean passable(int x, int y, int z) {
         Material m = materialAt(x, y, z);
         return m != null && PASSABLE[m.ordinal()];
@@ -205,7 +221,10 @@ public final class NavGrid {
         void accept(int x, int y, int z, double cost);
     }
 
-    public void forEachMove(int x, int y, int z, MoveSink out) {
+    public void forEachMove(int x, int y, int z, MoveSink sink) {
+        final MoveSink out = cellCosts == null ? sink
+                : (nx, ny, nz, cost) -> sink.accept(nx, ny, nz,
+                        cost + cellCosts.transitionCost(x, y, z, nx, ny, nz));
         boolean inWater = water(x, y, z);
         boolean onClimb = climbable(x, y, z);
 
@@ -295,8 +314,40 @@ public final class NavGrid {
         if (sticky(x, y, z) || sticky(x, y - 1, z)) p += 3.0;
         if (door(x, y, z)) p += 1.5;
         if (dangerous(x, y - 1, z)) p += 40.0;
+        p += clearancePenalty(x, y, z);
         p += avoidPenalty(x, y, z);
         return p;
+    }
+
+    // Small cost for cells that hug an obstacle at body height (tree trunks,
+    // walls, fence posts). The bot is 0.6 wide and follows a smoothed line,
+    // so a route that brushes a trunk corner is the one it snags on; paying a
+    // little to keep a block of margin where the terrain allows it keeps the
+    // path out of that situation. Uniform in 1-wide corridors, so it never
+    // changes which corridor wins, only where in open ground the path runs.
+    private double clearancePenalty(int x, int y, int z) {
+        int blocked = 0;
+        for (int[] d : CARDINALS) {
+            int ax = x + d[0], az = z + d[1];
+            if (solid(ax, y, az) || solid(ax, y + 1, az)) blocked++;
+        }
+        return blocked * CLEARANCE_COST;
+    }
+
+    public static final double CLEARANCE_COST = 0.12;
+
+    private CellCostMap cellCosts;
+
+    public void setCellCosts(CellCostMap costs) {
+        this.cellCosts = (costs == null || costs.isEmpty()) ? null : costs;
+    }
+
+    public double frontierBias(int x, int y, int z) {
+        return cellCosts == null ? 0.0 : cellCosts.frontierBias(x, y, z);
+    }
+
+    public boolean knownDeadEnd(int x, int y, int z) {
+        return cellCosts != null && cellCosts.deadEnd(x, y, z);
     }
 
     private int[] avoidX;
@@ -378,35 +429,78 @@ public final class NavGrid {
         return p;
     }
 
+    // Half-width used when sweeping the bot's hitbox along a straight
+    // segment. The real player box is 0.3; a hair of extra margin keeps the
+    // smoothed path from grazing trunk/wall corners it would snag on.
+    public static final double SWEEP_HALF_WIDTH = 0.34;
+
+    // Can the bot walk the straight segment between two cell centres? Sweeps
+    // the full hitbox (not just the centre line), so a shortcut that clips
+    // the corner of a log, a fence post or a maze wall is rejected - those
+    // grazing shortcuts are what used to leave bots pinned against trees.
     public boolean walkableLine(int x1, int y1, int z1, int x2, int y2, int z2) {
         int dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
-        int steps = Math.max(Math.abs(dx), Math.abs(dz));
-        if (steps == 0) return Math.abs(dy) <= 1;
+        int cells = Math.max(Math.abs(dx), Math.abs(dz));
+        if (cells == 0) return Math.abs(dy) <= 1;
 
         if (Math.abs(dy) > 1) return false;
 
+        double ax = x1 + 0.5, az = z1 + 0.5;
+        double bx = x2 + 0.5, bz = z2 + 0.5;
+        // Sample by true (euclidean) length, finer than the hitbox width, so
+        // long diagonal shortcuts can't step over a trunk corner between
+        // samples.
+        int samples = Math.max(2, (int) Math.ceil(Math.sqrt((double) dx * dx + (double) dz * dz) / 0.125));
+
         int prevY = y1;
-        int prevX = x1, prevZ = z1;
-        for (int i = 1; i <= steps; i++) {
-            double t = (double) i / steps;
-            int sx = x1 + (int) Math.round(dx * t);
-            int sz = z1 + (int) Math.round(dz * t);
+        int prevCx = x1, prevCz = z1;
+        for (int i = 1; i <= samples; i++) {
+            double t = (double) i / samples;
+            double px = ax + (bx - ax) * t;
+            double pz = az + (bz - az) * t;
+            int cx = (int) Math.floor(px);
+            int cz = (int) Math.floor(pz);
 
-            boolean ok = false;
             int foundY = prevY;
-            for (int yy = prevY + 1; yy >= prevY - 1; yy--) {
-                if (standable(sx, yy, sz)) { ok = true; foundY = yy; break; }
-            }
-            if (!ok) return false;
+            if (cx != prevCx || cz != prevCz) {
+                boolean ok = false;
+                for (int yy = prevY + 1; yy >= prevY - 1; yy--) {
+                    if (standable(cx, yy, cz)) { ok = true; foundY = yy; break; }
+                }
+                if (!ok) return false;
 
-            if (sx != prevX && sz != prevZ) {
-                if (!bodyFits(prevX, foundY, sz) && !bodyFits(sx, foundY, prevZ)) return false;
+                // Stepping up mid-line needs head room above where we were.
+                if (foundY > prevY && !passable(prevCx, prevY + 2, prevCz)) return false;
+
+                if (cx != prevCx && cz != prevCz) {
+                    if (!bodyFits(prevCx, foundY, cz) || !bodyFits(cx, foundY, prevCz)) return false;
+                }
             }
+
+            int bodyY = Math.max(foundY, prevY);
+            if (!hitboxClear(px, bodyY, pz)) return false;
 
             prevY = foundY;
-            prevX = sx;
-            prevZ = sz;
+            prevCx = cx;
+            prevCz = cz;
         }
         return Math.abs(prevY - y2) <= 1;
+    }
+
+    private boolean hitboxClear(double px, int y, double pz) {
+        int x0 = (int) Math.floor(px - SWEEP_HALF_WIDTH);
+        int x1 = (int) Math.floor(px + SWEEP_HALF_WIDTH);
+        int z0 = (int) Math.floor(pz - SWEEP_HALF_WIDTH);
+        int z1 = (int) Math.floor(pz + SWEEP_HALF_WIDTH);
+        for (int x = x0; x <= x1; x++) {
+            for (int z = z0; z <= z1; z++) {
+                if (passable(x, y, z) && passable(x, y + 1, z)) continue;
+                // Overlapping a one-block rise is fine - that's a step the
+                // line is about to climb (dy is capped at 1), not a snag.
+                if (standable(x, y + 1, z)) continue;
+                return false;
+            }
+        }
+        return true;
     }
 }

@@ -7,6 +7,11 @@ import java.util.PriorityQueue;
 public final class Pathfinder {
     public static int maxExpansions = 12000;
 
+    // Ceiling used when the caller has detected maze-like terrain: corridors
+    // with dead ends need far more of the search space explored before the
+    // real route shows up, and this runs off the main thread anyway.
+    public static int mazeMaxExpansions = 45000;
+
     public static double heuristicWeight = 1.05;
 
     private static boolean atGoal(int x, int y, int z, int gx, int gy, int gz) {
@@ -35,10 +40,17 @@ public final class Pathfinder {
         public final boolean complete;
         public final int expansions;
 
-        Result(List<Step> steps, boolean complete, int expansions) {
+        // True when the open set ran dry before the goal was found: every
+        // cell reachable inside the search window was explored, so the goal
+        // is genuinely unreachable from here (as opposed to the budget
+        // simply running out).
+        public final boolean exhausted;
+
+        Result(List<Step> steps, boolean complete, int expansions, boolean exhausted) {
             this.steps = steps;
             this.complete = complete;
             this.expansions = expansions;
+            this.exhausted = exhausted;
         }
     }
 
@@ -76,7 +88,7 @@ public final class Pathfinder {
                               int gx, int gy, int gz,
                               int expansionBudget) {
         int[] start = snapToStandable(grid, sx, sy, sz);
-        if (start == null) return new Result(new ArrayList<>(), false, 0);
+        if (start == null) return new Result(new ArrayList<>(), false, 0, false);
         sx = start[0]; sy = start[1]; sz = start[2];
 
         int[] goal = snapToStandable(grid, gx, gy, gz);
@@ -92,8 +104,15 @@ public final class Pathfinder {
         open.add(startNode);
         best.put(key(sx, sy, sz), 0.0);
 
+        // Partial-path end selection: plain "closest to the goal" walks
+        // straight into the dead end nearest the goal in a maze and then
+        // re-picks it forever. Score frontier candidates by distance plus
+        // what the bot has learned about the cell (visited a lot / proven
+        // dead end), so repeated partial searches push into unexplored
+        // corridors instead.
         Node closest = startNode;
-        double closestD = trueDistance(sx, sy, sz, fgx, fgy, fgz);
+        double closestD = trueDistance(sx, sy, sz, fgx, fgy, fgz)
+                + grid.frontierBias(sx, sy, sz);
         Node goalNode = null;
         int expansions = 0;
 
@@ -104,7 +123,8 @@ public final class Pathfinder {
             if (cur.g > best.get(ck) + 1e-9) continue;
             expansions++;
 
-            double trueD = trueDistance(cur.x, cur.y, cur.z, fgx, fgy, fgz);
+            double trueD = trueDistance(cur.x, cur.y, cur.z, fgx, fgy, fgz)
+                    + grid.frontierBias(cur.x, cur.y, cur.z);
             if (trueD < closestD) {
                 closestD = trueD;
                 closest = cur;
@@ -126,17 +146,18 @@ public final class Pathfinder {
         }
 
         boolean complete = goalNode != null;
+        boolean exhausted = !complete && open.isEmpty();
         Node end = complete ? goalNode : closest;
 
         if (end == null || end.parent == null) {
-            return new Result(new ArrayList<>(), false, expansions);
+            return new Result(new ArrayList<>(), false, expansions, exhausted);
         }
 
         List<Step> raw = new ArrayList<>(64);
         for (Node n = end; n != null; n = n.parent) raw.add(new Step(n.x, n.y, n.z));
         java.util.Collections.reverse(raw);
 
-        return new Result(smooth(grid, raw), complete, expansions);
+        return new Result(smooth(grid, raw), complete, expansions, exhausted);
     }
 
     private static List<Step> smooth(NavGrid grid, List<Step> path) {
@@ -185,7 +206,7 @@ public final class Pathfinder {
         return Math.sqrt(dx * dx + dz * dz) + vertical;
     }
 
-    private static long key(int x, int y, int z) {
+    static long key(int x, int y, int z) {
         return ((long) (x & 0x3FFFFFF) << 38)
                 | ((long) (y & 0xFFF) << 26)
                 | (long) (z & 0x3FFFFFF);

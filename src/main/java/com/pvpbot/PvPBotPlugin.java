@@ -126,6 +126,9 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
                 Math.max(16, getConfig().getInt("performance.path-search-radius", 72));
         com.pvpbot.nav.Pathfinder.maxExpansions =
                 Math.max(500, getConfig().getInt("performance.path-max-expansions", 8000));
+        com.pvpbot.nav.Pathfinder.mazeMaxExpansions =
+                Math.max(com.pvpbot.nav.Pathfinder.maxExpansions,
+                        getConfig().getInt("performance.path-maze-max-expansions", 45000));
 
         com.pvpbot.ai.RestockController.loadConfig(getConfig().getConfigurationSection("restock"));
 

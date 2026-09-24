@@ -96,6 +96,9 @@ public class PathfindingController {
                 && context.target.getLocation().distanceSquared(end) <= 4.0
                 ? context.target : null;
 
+        context.mazeMemory.setGoal(gx, gy, gz);
+        final boolean mazeMode = context.mazeMemory.isMazeLike(context.tickCounter);
+
         double ddx = sx - gx, ddy = sy - gy, ddz = sz - gz;
         if (ddx * ddx + ddy * ddy + ddz * ddz > maxPathDistance * maxPathDistance) {
             context.pathRecalcCooldown = 36 + java.util.concurrent.ThreadLocalRandom.current().nextInt(9);
@@ -110,7 +113,10 @@ public class PathfindingController {
         int flatDist = (int) Math.sqrt(ddx * ddx + ddz * ddz);
         int recoveryPad = Math.min(32, context.pathFailures * 6
                 + (context.holeEscapeTicks > 0 ? 10 : 0));
-        int pad = Math.min(searchRadius, 40 + flatDist / 2 + recoveryPad);
+        // Mazes wind far away from the straight line, so give the search
+        // room to follow corridors that loop out past the start/goal box.
+        if (mazeMode) recoveryPad += 24;
+        int pad = Math.min(searchRadius + (mazeMode ? 16 : 0), 40 + flatDist / 2 + recoveryPad);
         int verticalRecoveryPad = Math.min(24, context.pathFailures * 3
                 + (context.holeEscapeTicks > 0 ? 12 : 0));
         int searchVerticalPad = Math.min(56, verticalPad + verticalRecoveryPad);
@@ -169,8 +175,11 @@ public class PathfindingController {
 
         int recoveryBudget = Math.min(5000, context.pathFailures * 900
                 + (context.holeEscapeTicks > 0 ? 1800 : 0));
-        final int budget = Math.max(3600,
-                Math.min(Pathfinder.maxExpansions, 2000 + flatDist * 260 + recoveryBudget));
+        final int budget = mazeMode
+                ? Math.max(12000, Math.min(Pathfinder.mazeMaxExpansions,
+                        6000 + flatDist * 600 + recoveryBudget * 3))
+                : Math.max(3600, Math.min(Pathfinder.maxExpansions,
+                        2000 + flatDist * 260 + recoveryBudget));
 
         try {
             CompletableFuture
@@ -253,6 +262,9 @@ public class PathfindingController {
             }
             if (cn > 0) grid.setCrowd(cx, cz, cn, 6.0);
         }
+
+        grid.setCellCosts(context.mazeMemory.export(world,
+                minX, minY, minZ, maxX, maxY, maxZ, context.tickCounter));
     }
 
     // =====================================================================
@@ -302,9 +314,16 @@ public class PathfindingController {
             }
         }
 
+        if (result != null && err == null) {
+            context.mazeMemory.onPathResult(result.complete, result.exhausted);
+        }
+
         if (err != null || result == null || result.steps.isEmpty()) {
             discardRoute();
-            context.pathFailures = Math.min(context.pathFailures + 1, 5);
+            // An exhausted search explored everything reachable in the
+            // window: count it double so the next attempt widens faster.
+            int bump = (result != null && result.exhausted) ? 2 : 1;
+            context.pathFailures = Math.min(context.pathFailures + bump, 5);
             int backoff = 12 + context.pathFailures * (10 + java.util.concurrent.ThreadLocalRandom.current().nextInt(5));
             context.pathRecalcCooldown = Math.max(context.pathRecalcCooldown, backoff);
             return;
@@ -327,6 +346,9 @@ public class PathfindingController {
         context.pathNodeStuckTicks = 0;
         context.lastPathNodeIndex = -1;
         context.lastPathNodeDistance = -1.0;
+        context.pathRecenterTicks = 0;
+        context.pathNodeBumps = 0;
+        context.pathBumpNodeIndex = -1;
 
         if (!result.complete) {
             context.pathRecalcCooldown = Math.min(context.pathRecalcCooldown,

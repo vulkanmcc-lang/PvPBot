@@ -94,6 +94,12 @@ performance:
   # the scaling matters more than the ceiling.
   path-max-expansions: 8000
 
+  # Ceiling used instead of the one above while a bot is in maze-like terrain
+  # (it has found dead ends, or walked to the end of a partial route without
+  # reaching its goal). Corridors force the search to explore much more of
+  # the area before the real route appears. Still off-thread.
+  path-maze-max-expansions: 45000
+
   # ── learned terrain ──
   #
   # Places bots have repeatedly failed to get through, shared across the whole

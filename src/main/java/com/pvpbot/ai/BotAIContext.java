@@ -338,6 +338,17 @@ public class BotAIContext {
 
     public final NavAvoid navAvoid = new NavAvoid();
 
+    // Per-bot maze knowledge (visited corridors + filled dead ends); see
+    // com.pvpbot.nav.MazeMemory.
+    public final com.pvpbot.nav.MazeMemory mazeMemory = new com.pvpbot.nav.MazeMemory();
+
+    // Ticks left steering back to the previous path node after bumping into
+    // something (a trunk corner, a wall) mid-path, and how many bumps the
+    // current node has caused.
+    public int pathRecenterTicks = 0;
+    public int pathNodeBumps = 0;
+    public int pathBumpNodeIndex = -1;
+
     public void markNavFailure(int x, int y, int z) {
         navAvoid.mark(x, y, z, tickCounter);
         if (!settings.isUseTerrainMemory()) return;

@@ -2194,8 +2194,57 @@ public class MovementController {
             context.pathCollideTicks = 0;
         }
 
+        if (context.pathRecenterTicks > 0) {
+            context.pathRecenterTicks--;
+            if (steerOntoPathSegment(handle, botLoc)) return;
+            context.pathRecenterTicks = 0;
+        }
+
+        boolean blindAvoid = false;
         if (context.pathCollideTicks >= 2) {
             context.pathCollideTicks = 0;
+
+            // Bumping the face of a one-block rise the path climbs is just
+            // the step - jump it rather than treating it as an obstacle.
+            Location ahead = context.currentPath.get(context.pathNodeIndex);
+            int aheadRise = (int) Math.floor(ahead.getY() + 0.5) - feetBlockY(botLoc, handle);
+            double aheadDx = ahead.getX() + 0.5 - botLoc.getX();
+            double aheadDz = ahead.getZ() + 0.5 - botLoc.getZ();
+            boolean stepAhead = aheadRise == 1
+                    && aheadDx * aheadDx + aheadDz * aheadDz < 2.0 * 2.0;
+
+            if (stepAhead) {
+                if (handle.onGround() && context.jumpCooldown <= 0) requestJump();
+            } else {
+                if (context.pathBumpNodeIndex != context.pathNodeIndex) {
+                    context.pathBumpNodeIndex = context.pathNodeIndex;
+                    context.pathNodeBumps = 0;
+                }
+                context.pathNodeBumps++;
+
+                if (context.pathNodeBumps >= 4) {
+                    abandonPath("repeatedly blocked on the way to a waypoint");
+                    return;
+                }
+
+                // Usually a snag means the bot drifted off the planned line
+                // (knockback, a strafe, a carrot that shaved a corner) and
+                // its shoulder caught a trunk/wall edge. The planned segment
+                // itself was hitbox-swept when the path was built, so getting
+                // back onto it is the reliable fix - far better than the old
+                // blind strafe-and-jump, which could circle a tree forever.
+                if (context.pathNodeBumps <= 2) {
+                    context.pathRecenterTicks = 14;
+                    if (steerOntoPathSegment(handle, botLoc)) return;
+                    context.pathRecenterTicks = 0;
+                }
+                // Already on the line (or recentring didn't help): last
+                // resort before giving up on the path is a side-step.
+                blindAvoid = true;
+            }
+        }
+
+        if (blindAvoid) {
             context.avoidDir = chooseAvoidDir(handle, botLoc);
             context.avoidTicks = 8;
 
@@ -2230,7 +2279,7 @@ public class MovementController {
                 laneProbes++;
                 int nodeY = (int) Math.floor(n.getY() + 0.5);
                 int endY = laneWalkable(world, botLoc.getX(), botBlockY, botLoc.getZ(),
-                        n.getX() + 0.5, n.getZ() + 0.5);
+                        n.getX() + 0.5, n.getZ() + 0.5, true);
                 if (endY == Integer.MIN_VALUE || Math.abs(endY - nodeY) > 1) continue;
             }
 
@@ -2280,6 +2329,12 @@ public class MovementController {
             if (Math.abs(heightDiff) <= 1) {
                 context.pathNodeIndex++;
                 if (context.pathNodeIndex >= context.currentPath.size()) {
+                    if (!context.pathComplete) {
+                        // End of a partial route: this frontier didn't reach
+                        // the goal, so make the next search prefer others.
+                        context.mazeMemory.onFrontierReached(node.getBlockX(),
+                                node.getBlockY(), node.getBlockZ(), context.tickCounter);
+                    }
                     context.currentPath.clear();
                     context.pathNodeIndex = 0;
                     context.pathComplete = false;
@@ -2322,7 +2377,7 @@ public class MovementController {
 
         if ((Math.abs(carrotX - nx) > 0.01 || Math.abs(carrotZ - nz) > 0.01)
                 && laneWalkable(world, botLoc.getX(), botBlockY, botLoc.getZ(),
-                carrotX, carrotZ) == Integer.MIN_VALUE) {
+                carrotX, carrotZ, true) == Integer.MIN_VALUE) {
             carrotX = nx;
             carrotZ = nz;
         }
@@ -2364,9 +2419,77 @@ public class MovementController {
 
     private static final double PATH_LOOKAHEAD = 4.5;
 
+    // Steer back onto the planned segment (previous node -> current node) by
+    // heading for the closest point on it, nudged a little forward so the
+    // bot rejoins the line moving the right way. Returns false once the bot
+    // is already on the line (so recentring can't help) or when the anchor
+    // isn't straight-line reachable.
+    private boolean steerOntoPathSegment(ServerPlayer handle, Location botLoc) {
+        if (context.pathNodeIndex >= context.currentPath.size()) return false;
+        Location node = context.currentPath.get(context.pathNodeIndex);
+        double bx = node.getX() + 0.5, bz = node.getZ() + 0.5;
+
+        double ax, az;
+        if (context.pathNodeIndex > 0) {
+            Location prev = context.currentPath.get(context.pathNodeIndex - 1);
+            ax = prev.getX() + 0.5;
+            az = prev.getZ() + 0.5;
+        } else {
+            ax = Math.floor(botLoc.getX()) + 0.5;
+            az = Math.floor(botLoc.getZ()) + 0.5;
+        }
+
+        double sx = bx - ax, sz = bz - az;
+        double segLen2 = sx * sx + sz * sz;
+        double t = segLen2 < 1.0e-6 ? 1.0
+                : ((botLoc.getX() - ax) * sx + (botLoc.getZ() - az) * sz) / segLen2;
+        t = Math.max(0.0, Math.min(1.0, t));
+        double segLen = Math.sqrt(segLen2);
+        if (segLen > 1.0e-3) t = Math.min(1.0, t + 0.35 / segLen);
+        double tx = ax + sx * t, tz = az + sz * t;
+
+        double dx = tx - botLoc.getX();
+        double dz = tz - botLoc.getZ();
+        double off = Math.sqrt(dx * dx + dz * dz);
+
+        // Distance from the line itself (ignoring the forward nudge).
+        double t0 = segLen2 < 1.0e-6 ? 1.0
+                : Math.max(0.0, Math.min(1.0,
+                ((botLoc.getX() - ax) * sx + (botLoc.getZ() - az) * sz) / segLen2));
+        double lx = ax + sx * t0 - botLoc.getX();
+        double lz = az + sz * t0 - botLoc.getZ();
+        if (lx * lx + lz * lz < 0.18 * 0.18) return false;
+        if (off < 1.0e-3) return false;
+
+        int feetY = feetBlockY(botLoc, handle);
+        if (laneWalkable(botLoc.getWorld(), botLoc.getX(), feetY, botLoc.getZ(), tx, tz, true)
+                == Integer.MIN_VALUE) {
+            return false;
+        }
+
+        context.navBranch = "PATH-RECENTER";
+        dx /= off;
+        dz /= off;
+        if (!context.aimLockedOnTarget) {
+            turnTowards(handle, (float) Math.toDegrees(Math.atan2(-dx, dz)));
+        }
+        worldDirToInputs(handle, dx, dz, 0.85f);
+        return true;
+    }
+
     private int laneWalkable(org.bukkit.World w,
                              double x0, int y0, double z0,
                              double x1, double z1) {
+        return laneWalkable(w, x0, y0, z0, x1, z1, false);
+    }
+
+    // hitbox=true sweeps the bot's full 0.6-wide box along the lane instead
+    // of just its centre point. Used when deciding whether it's safe to cut
+    // a corner (skip ahead a node / aim at the look-ahead carrot): the centre
+    // line can squeak past a tree trunk that the shoulders still hit.
+    private int laneWalkable(org.bukkit.World w,
+                             double x0, int y0, double z0,
+                             double x1, double z1, boolean hitbox) {
         if (w == null) return Integer.MIN_VALUE;
 
         double dx = x1 - x0;
@@ -2398,6 +2521,10 @@ public class MovementController {
             }
             if (landed == Integer.MIN_VALUE) return Integer.MIN_VALUE;
 
+            if (hitbox && !laneHitboxClear(w, x0 + dx * i, Math.max(landed, y), z0 + dz * i)) {
+                return Integer.MIN_VALUE;
+            }
+
             if (bx != prevBx && bz != prevBz) {
                 boolean sideA = isPassable(w.getBlockAt(prevBx, landed, bz))
                         && isPassable(w.getBlockAt(prevBx, landed + 1, bz));
@@ -2414,6 +2541,27 @@ public class MovementController {
     }
 
     private static final int MAX_LANE_DROP = 3;
+
+    private static final double LANE_HALF_WIDTH = 0.32;
+
+    private static boolean laneHitboxClear(org.bukkit.World w, double px, int y, double pz) {
+        int x0 = (int) Math.floor(px - LANE_HALF_WIDTH);
+        int x1 = (int) Math.floor(px + LANE_HALF_WIDTH);
+        int z0 = (int) Math.floor(pz - LANE_HALF_WIDTH);
+        int z1 = (int) Math.floor(pz + LANE_HALF_WIDTH);
+        for (int bx = x0; bx <= x1; bx++) {
+            for (int bz = z0; bz <= z1; bz++) {
+                if (isPassable(w.getBlockAt(bx, y, bz))
+                        && isPassable(w.getBlockAt(bx, y + 1, bz))) continue;
+                // A shoulder over a one-block rise is a step, not a snag.
+                if (isStandableFloor(w.getBlockAt(bx, y, bz))
+                        && isPassable(w.getBlockAt(bx, y + 1, bz))
+                        && isPassable(w.getBlockAt(bx, y + 2, bz))) continue;
+                return false;
+            }
+        }
+        return true;
+    }
 
     private static boolean isPassable(Block b) {
         if (b == null) return false;
@@ -2643,6 +2791,11 @@ public class MovementController {
     }
 
     public void checkIfStuck(Location loc) {
+        if (loc.getWorld() != null) {
+            context.mazeMemory.observe(loc.getWorld(), loc.getBlockX(),
+                    (int) Math.floor(loc.getY() + 0.01), loc.getBlockZ(), context.tickCounter);
+        }
+
         if (context.lastPos == null) {
             context.lastPos = context.objectPool.cloneLocation(loc);
             return;
