@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Eclipse
+bin/
+.classpath
+.project
+.settings/
+
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pre-rewrite safety backups (see chat history) - git history is the
+# backup mechanism going forward, no need to track these separately.
+backups/

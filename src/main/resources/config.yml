@@ -1,0 +1,192 @@
+use-vanilla-entity-tracker: true
+skin-sources: []
+factions: {}
+prevent-faction-friendly-fire: true
+harvest-player-skins: false
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PERFORMANCE
+#
+# Defaults are tuned for ~100 bots on a normal server. If you are running far
+# fewer, none of this will ever engage; if you are running more, lower the
+# pathfinding budgets first — that is the setting that actually costs TPS.
+# ──────────────────────────────────────────────────────────────────────────────
+performance:
+
+  # Level of detail. Bots that are idle AND out of every real player's sight
+  # run physics every tick but only re-run the AI decision tree every
+  # `ai-lod-stride` ticks. Bots that are fighting, fleeing, escorting, hurt,
+  # pathing, or within `ai-lod-radius` of a human always tick at full rate, so
+  # nothing observable changes. Turn off to reproduce old behaviour exactly.
+  ai-lod: true
+
+  # Bots this close to a real player always tick at full rate, whatever they
+  # are doing. Raise it if you notice idle bots looking stiff at a distance.
+  ai-lod-radius: 48.0
+
+  # Decision-tree interval for quiet, unwatched bots. 4 = a full think five
+  # times a second. Phases are staggered by entity id, so the cost spreads
+  # evenly instead of spiking on one tick in four.
+  ai-lod-stride: 4
+
+  # Below this many bots, AI level-of-detail is switched off entirely.
+  #
+  # Throttling deliberation is a response to load, not something worth doing
+  # by default. A throttled bot reuses last tick's movement inputs, so it only
+  # changes direction or re-aims a few times a second — which reads as
+  # stuttering and drifting even while /tps shows a flat 20. Below this count
+  # the server has the headroom, so every bot thinks every tick.
+  ai-lod-min-bots: 48
+
+  # ── navigation ──
+  #
+  # Terrain is no longer read a block at a time. The pathfinder captures whole
+  # chunks into a shared, thread-safe cache, so a hundred bots fighting in one
+  # area pay for the terrain once between them instead of each reading its own
+  # overlapping copy. These budgets therefore count CHUNKS, not blocks — old
+  # per-cell numbers do not translate.
+
+  # Path requests a single tick may grant, server-wide.
+  #
+  # This was previously capped at 2 by a default that no config key could
+  # reach, left over from when one request meant reading ~120,000 blocks on
+  # the main thread. A request is now ~20 chunk lookups against a shared cache
+  # running at a ~98% hit rate, so 2 was refusing roughly a fifth of all
+  # navigation while the tick loop sat at 2ms out of 50. Check the deferral
+  # percentage in /pvpbot performance: a few percent is fine, double digits means
+  # bots are running at things in straight lines because they were refused a
+  # route. Raise this before anything else.
+  path-requests-per-tick: 12
+
+  # Extra slots each tick reserved for bots that keep losing the race. Callers
+  # are polled in bot iteration order, so without a reserve the same bots win
+  # every tick and the ones at the back never navigate at all — which looks
+  # like some bots being permanently stupid rather than like a budget.
+  path-reserve-per-tick: 4
+
+  # Chunk windows a single tick may hand out, server-wide. A 5x5 window is 25.
+  path-chunks-per-tick: 256
+
+  # NEW chunk captures per tick, server-wide. Cache hits are free and do not
+  # count against this; only terrain nobody has looked at recently does.
+  chunk-captures-per-tick: 12
+
+  # How long captured terrain stays trusted, in ticks. Block placements,
+  # breaks and explosions invalidate immediately regardless — this only bounds
+  # how long a change nobody told us about (other plugins, fluid flow) can
+  # persist. 200 = 10 seconds.
+  nav-cache-ttl-ticks: 200
+
+  # Horizontal reach of one search, in blocks. This is the detour budget: a
+  # window drawn tight to the straight line can only ever confirm that the
+  # straight line is blocked, so this needs room to route AROUND things.
+  path-search-radius: 72
+
+  # A* expansion ceiling. The old limit was 700, which ran out roughly twenty
+  # blocks out — not enough to get around anything bigger than a hut, and when
+  # it ran out the bot walked confidently into a wall. The search runs
+  # off-thread, so this buys reach rather than lag.
+  #
+  # This is now a CEILING rather than the figure every search uses: the budget
+  # actually granted scales with how far the bot is going, so a ten-block hop
+  # finishes sooner and a long trip still gets room to complete. A search that
+  # runs out returns a PARTIAL route, which the follower then walks into, so
+  # the scaling matters more than the ceiling.
+  path-max-expansions: 8000
+
+  # ── learned terrain ──
+  #
+  # Places bots have repeatedly failed to get through, shared across the whole
+  # fleet and kept in terrain-memory.yml across restarts. A cell only counts
+  # after it has beaten three separate attempts — one failure is usually
+  # another bot standing in the doorway rather than anything about the ground,
+  # and promoting those would slowly paint the map with penalties that describe
+  # a crowd instead of the terrain.
+  #
+  # Entries decay after about twenty minutes without a fresh failure, because
+  # terrain genuinely changes on a survival server and a grudge with no expiry
+  # is its own bug.
+  terrain-memory: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RESTOCKING
+#
+# When a bot runs low on something and is carrying a shulker box that contains
+# it, it puts the box down, takes what it needs, mines it back up and carries
+# on. The whole sequence is performed physically — placed, opened, looted,
+# mined — rather than teleporting items out of the item's NBT, because the
+# latter looks exactly like what it is.
+#
+# Bots also convert breeze rods into wind charges. That is a 1x1 recipe, so it
+# fits the 2x2 grid in the player's own inventory: no table, no walking, and it
+# is allowed in situations where a shulker trip would be suicide.
+# ──────────────────────────────────────────────────────────────────────────────
+restock:
+  enabled: true
+
+  # No hostile may be within this many blocks to START a trip. Once committed
+  # the bot tolerates half this distance before it grabs the box and bails —
+  # otherwise it would abandon the trip for anyone merely visible.
+  safe-radius: 20.0
+
+  # Ticks between restock attempts, including failed ones (nothing useful in
+  # the box, nowhere to place it). 300 = 15 seconds.
+  cooldown-ticks: 300
+
+  # Convert breeze rods once wind charges drop below this.
+  wind-charge-craft-threshold: 16
+
+  # low     - drop below this and the bot will make a trip
+  # desired - top up to this while it has the box open
+  #
+  # These are per-item on purpose. "Take one stack" is meaningless for the item
+  # that matters most: a totem of undying has a max stack size of ONE, so a
+  # stack-based rule would hand the bot a single totem and call it done.
+  #
+  # A single trip still never takes more than one stack of any stackable item,
+  # so bots do not strip a box bare in one visit.
+  items:
+    TOTEM_OF_UNDYING:
+      low: 2
+      desired: 6
+    WIND_CHARGE:
+      low: 8
+      desired: 64
+    EXPERIENCE_BOTTLE:
+      low: 8
+      desired: 64
+    ENCHANTED_GOLDEN_APPLE:
+      low: 2
+      desired: 16
+    GOLDEN_APPLE:
+      low: 4
+      desired: 32
+    ENDER_PEARL:
+      low: 2
+      desired: 16
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOT PERSISTENCE
+#
+# Bots survive a restart: the roster is written to bots.yml and the bots come
+# back where they were, in their factions, with their settings, still walking
+# whatever route or holding whatever guard post they were assigned.
+#
+# Inventory, armour, health, hunger, XP and potion effects are NOT stored in
+# bots.yml. Bots are real players to the server, so those live in the ordinary
+# playerdata files and the server loads them back itself — persistence simply
+# stops deleting them on shutdown.
+#
+# NOT restored, on purpose: whoever a bot was fighting, where it was walking
+# to, its formation slot and any build task. Those describe a moment rather
+# than an instruction, and the moment ended with the server.
+persistence:
+  enabled: true
+
+  # Ticks after the plugin enables before bots are put back.
+  #
+  # Not zero, and not tunable down to zero for a good reason: spawning a bot
+  # fires PlayerJoinEvent, and during plugin startup other plugins have not
+  # enabled yet, so their join listeners would miss every restored bot. Raise
+  # this if a protection or NPC plugin on your server starts slowly.
+  restore-delay-ticks: 40
