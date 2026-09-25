@@ -351,16 +351,42 @@ public class InventoryController {
         if (context.eating || context.drinkingPotionTimer > 0) return;
         ServerPlayer handle = context.bot.getHandle();
         if (handle == null || !handle.isUsingItem()) return;
+        // Someone is coming down on us with a mace: the shield stays up no
+        // matter which system asked to lower it (knockback reaction from the
+        // attacker's own wind charge, an attack/crit setup, cobweb play...).
+        // Dropping it for even a tick at impact eats the full smash.
+        if (smashThreatBlocking(botPlayer)) return;
         handle.stopUsingItem();
         context.packetBroadcaster.broadcastEntityData();
+    }
+
+    // True while a smash threat is live AND the bot can actually block it
+    // with a raised shield - the one case where lowering the shield is never
+    // worth it.
+    public boolean smashThreatBlocking(Player botPlayer) {
+        if (context.smashThreatTicks <= 0 || botPlayer == null) return false;
+        if (!context.settings.isShielding()) return false;
+        if (!holdsShield(botPlayer) || shieldDisabled(botPlayer)) return false;
+        ServerPlayer handle = context.bot.getHandle();
+        return handle != null && handle.isUsingItem()
+                && canBlockAttacks(botPlayer.getInventory().getItem(
+                        handle.getUsedItemHand() == net.minecraft.world.InteractionHand.OFF_HAND
+                                ? org.bukkit.inventory.EquipmentSlot.OFF_HAND
+                                : org.bukkit.inventory.EquipmentSlot.HAND));
     }
 
     public void manageShieldBlock(Player botPlayer) {
         context.inventoryController.organizeHotbar(botPlayer);
         net.minecraft.server.level.ServerPlayer handle = context.bot.getHandle();
 
+        // Keep the longest outstanding threat instead of overwriting it with
+        // this tick's reading: in the last few ticks of a smash the attacker
+        // is low/close and can drop out of the detection window, and
+        // overwriting turned that into "threat over" and a lowered shield
+        // right as the mace connected. The counter decays once per tick in
+        // BotAI, so a threat still clears shortly after it's really gone.
         int smashTicks = detectSmashThreat(botPlayer);
-        context.smashThreatTicks = smashTicks;
+        context.smashThreatTicks = Math.max(context.smashThreatTicks, smashTicks);
 
         boolean consuming = context.eating || context.drinkingPotionTimer > 0;
 
@@ -414,7 +440,9 @@ public class InventoryController {
         }
 
         if (!canBlock) {
-            if (threatBlock && !willAttack) {
+            // No "&& !willAttack" here: trading a swing for a mace smash is
+            // always a losing trade, and CombatController holds the swing.
+            if (threatBlock) {
                 if (!handle.isUsingItem()) {
                     handle.startUsingItem(net.minecraft.world.InteractionHand.OFF_HAND);
                     context.packetBroadcaster.broadcastEntityData();
@@ -492,9 +520,17 @@ public class InventoryController {
             double above = py - botY;
             double horiz = Math.sqrt(dxa * dxa + dza * dza);
             boolean maceInHand = isMace(p.getInventory().getItemInMainHand());
+            double vy = p.getVelocity().getY();
+            // A falling mace user that's already dropped far enough to smash
+            // is a threat right down to impact, even once they're level with
+            // (or a bit below) our feet - that's exactly where the hit lands.
+            boolean fallingSmash = maceInHand && vy < -0.2
+                    && p.getFallDistance() > 1.5 && above > -1.0;
 
             int ticks;
-            if (maceInHand && above > 1.0 && horiz < 6.0) {
+            if (fallingSmash && horiz < 6.0) {
+                ticks = 16;
+            } else if (maceInHand && above > 1.0 && horiz < 6.0) {
                 ticks = 16;
             } else if (above > 2.5 && horiz < 6.0 && carriesMace(p)) {
                 ticks = 12;
@@ -523,6 +559,13 @@ public class InventoryController {
         boolean wantTotem = context.totemRecoveryTicks > 0
                 || p.getHealth() <= 6.0
                 || context.fleeing;
+        // Never swap a raised shield out from under an incoming mace smash -
+        // blocking it outright beats popping a totem after it lands.
+        if (wantTotem && context.smashThreatTicks > 0
+                && p.getInventory().getItemInOffHand().getType() == Material.SHIELD
+                && !shieldDisabled(p)) {
+            wantTotem = false;
+        }
         Material desired = wantTotem ? Material.TOTEM_OF_UNDYING : Material.SHIELD;
 
         if (context.offhandSwapTicks > 0) {

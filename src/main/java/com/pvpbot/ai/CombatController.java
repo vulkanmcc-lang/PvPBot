@@ -552,6 +552,13 @@ public class CombatController {
         }
         if (context.fleeing) { context.lastAttackGate = "fleeing"; resetCrit(); return; }
         if (context.eating || context.drinkingPotionTimer > 0) { context.lastAttackGate = "eating/drinking"; resetCrit(); return; }
+        // Blocking an incoming mace smash beats any swing we could land now:
+        // attacking means lowering the shield, and the smash still connects.
+        if (context.inventoryController.smashThreatBlocking(botPlayer)) {
+            context.lastAttackGate = "shield up (mace smash incoming)";
+            resetCrit();
+            return;
+        }
 
         if (context.maceWindupTicks > 0 || context.maceWindCharge != null) {
             prepareOffensiveAction(botPlayer);
