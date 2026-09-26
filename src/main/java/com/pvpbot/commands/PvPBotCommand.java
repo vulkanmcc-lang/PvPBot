@@ -53,273 +53,93 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         String baseCmd = args[0].toLowerCase();
 
         switch (baseCmd) {
-            case "spawn", "spawnrandom", "spawnneutral", "spawnfrozen" -> {
-                NameGenerator.NameStyle style = baseCmd.equals("spawnrandom")
-                        ? NameGenerator.NameStyle.ALT
-                        : NameGenerator.NameStyle.CLEAN;
-                boolean neutral = baseCmd.equals("spawnneutral");
-                boolean frozen = baseCmd.equals("spawnfrozen");
-                String faction = args.length >= 2 ? args[1] : null;
-                String kit = args.length >= 3 ? args[2] : null;
-                boolean created = faction != null && !manager.factionExists(faction);
-
-                PvPBot bot = manager.spawnBot(player.getLocation(), faction, style);
-
-                if (neutral) manager.getBotSettings(bot.getUUID()).setHostile(false);
-                if (frozen) {
-                    var st = manager.getBotSettings(bot.getUUID());
-                    st.setFrozen(true);
-
-                    st.setHostile(false);
+            case "spawn", "spawnrandom", "spawnvoid", "spawnneutral", "spawnfrozen" -> {
+                // One syntax only: /pvpbot spawn<variant> [kit] [faction] [difficulty]
+                String variant = baseCmd.substring("spawn".length());
+                String usage = "/pvpbot " + baseCmd + " [kit] [faction] [difficulty]";
+                if (args.length > 4) {
+                    player.sendMessage("§cToo many arguments. Usage: §f" + usage);
+                    player.sendMessage("§7Use §fnone§7 to skip the kit or faction.");
+                    return true;
                 }
 
-                boolean kitApplied = false;
-                if (kit != null) {
-                    if (!kitManager.kitExists(kit)) {
-                        player.sendMessage("§cKit '§e" + kit + "§c' does not exist.");
-                    } else {
-                        bot.equipKit(kit);
-                        kitApplied = true;
-                    }
-                }
+                SpawnOptions opts = parseSpawnOptions(player, args, 1, usage);
+                if (opts == null) return true;
 
-                if (created) player.sendMessage("§7Faction §e" + faction.toLowerCase()
+                boolean created = opts.faction() != null && !manager.factionExists(opts.faction());
+                PvPBot bot = manager.spawnBot(player.getLocation(), opts.faction(), spawnNameStyle(variant));
+                List<PvPBot> spawned = List.of(bot);
+
+                applySpawnVariant(manager, spawned, variant);
+                if (opts.kit() != null) bot.equipKit(opts.kit());
+                String spread = applySpawnDifficulty(manager, spawned, opts.difficulty());
+
+                if (created) player.sendMessage("§7Faction §e" + opts.faction().toLowerCase()
                         + "§7 didn't exist yet — created it.");
                 player.sendMessage("§aSpawned "
-                        + (frozen ? "§7frozen§a " : neutral ? "§7neutral§a " : "") + "PvPBot: §e" + bot.getName()
-                        + (faction != null ? " §7in faction §e" + faction.toLowerCase() : "")
-                        + (kitApplied ? " §7wearing kit §e" + kit.toLowerCase() : ""));
-                if (frozen) player.sendMessage("§7A training dummy: it won't move or fight, "
-                        + "but still takes damage and knockback. "
-                        + "Use §f/pvpbot settings§7 to adjust it in the GUI.");
-                else if (neutral) player.sendMessage("§7It wanders and won't fight. "
-                        + "Use §f/pvpbot settings§7 to turn hostile back on.");
+                        + spawnVariantLabel(variant) + "PvPBot: §e" + bot.getName()
+                        + (opts.kit() != null ? " §7wearing kit §e" + opts.kit().toLowerCase() : "")
+                        + (opts.faction() != null ? " §7in faction §e" + opts.faction().toLowerCase() : "")
+                        + (spread != null ? " §7(" + spread + "§7)" : ""));
+                sendSpawnVariantHint(player, variant);
             }
 
-            case "massspawn", "masspawn", "masspawnrandom", "masspawnneutral", "masspawnfrozen" -> {
-                // Check if this is the new syntax: /pvpbot massspawn <number> void/normal/random [faction] [kit]
-                // Or: /pvpbot massspawn <number> <faction> void/normal/random [kit]
-                if (args.length >= 3) {
-                    String modeArg = args[2].toLowerCase();
-                    if (modeArg.equals("void") || modeArg.equals("normal") || modeArg.equals("random")) {
-                        try {
-                            int count = Integer.parseInt(args[1]);
-                            if (count < 1) {
-                                player.sendMessage("§cCount must be at least 1.");
-                                return true;
-                            }
-                            count = Math.min(count, 50);
-
-                            NameGenerator.NameStyle style;
-                            if (modeArg.equals("void")) {
-                                style = NameGenerator.NameStyle.VOID;
-                            } else if (modeArg.equals("random")) {
-                                style = NameGenerator.NameStyle.ALT;
-                            } else {
-                                style = NameGenerator.NameStyle.CLEAN;
-                            }
-
-                            String faction = args.length >= 4 ? args[3] : null;
-                            String kit = args.length >= 5 ? args[4] : null;
-                            boolean created = faction != null && !manager.factionExists(faction);
-
-                            var bots = manager.massSpawn(player.getLocation(), count, faction, style);
-
-                            if (kit != null) {
-                                if (!kitManager.kitExists(kit)) {
-                                    player.sendMessage("§cKit '§e" + kit + "§c' does not exist.");
-                                } else {
-                                    for (PvPBot b : bots) b.equipKit(kit);
-                                }
-                            }
-
-                            if (created) player.sendMessage("§7Faction §e" + faction.toLowerCase()
-                                    + "§7 didn't exist yet — created it.");
-
-                            String modeDesc = modeArg.equals("void") ? "§7void§a " : "";
-                            player.sendMessage("§aSpawned §e" + bots.size() + "§a " + modeDesc + "PvPBots"
-                                    + (faction != null ? " §7in faction §e" + faction.toLowerCase() : "")
-                                    + (kit != null ? " §7wearing kit §e" + kit.toLowerCase() : "")
-                                    + "§a.");
-                            return true;
-                        } catch (NumberFormatException e) {
-                            player.sendMessage("§cInvalid number. Usage: /pvpbot massspawn <number> void/normal/random [faction] [kit]");
-                            return true;
-                        }
-                    } else if (args.length >= 4 && manager.factionExists(modeArg)) {
-                        // Syntax: /pvpbot massspawn <count> <faction> <mode> [kit]
-                        String faction = modeArg;
-                        String actualMode = args[3].toLowerCase();
-                        if (!actualMode.equals("void") && !actualMode.equals("normal") && !actualMode.equals("random")) {
-                            player.sendMessage("§cInvalid mode. Use: void, normal, or random");
-                            return true;
-                        }
-                        try {
-                            int count = Integer.parseInt(args[1]);
-                            if (count < 1) {
-                                player.sendMessage("§cCount must be at least 1.");
-                                return true;
-                            }
-                            count = Math.min(count, 50);
-
-                            NameGenerator.NameStyle style;
-                            if (actualMode.equals("void")) {
-                                style = NameGenerator.NameStyle.VOID;
-                            } else if (actualMode.equals("random")) {
-                                style = NameGenerator.NameStyle.ALT;
-                            } else {
-                                style = NameGenerator.NameStyle.CLEAN;
-                            }
-
-                            String kit = args.length >= 5 ? args[4] : null;
-                            boolean created = faction != null && !manager.factionExists(faction);
-
-                            var bots = manager.massSpawn(player.getLocation(), count, faction, style);
-
-                            if (kit != null) {
-                                if (!kitManager.kitExists(kit)) {
-                                    player.sendMessage("§cKit '§e" + kit + "§c' does not exist.");
-                                } else {
-                                    for (PvPBot b : bots) b.equipKit(kit);
-                                }
-                            }
-
-                            if (created) player.sendMessage("§7Faction §e" + faction.toLowerCase()
-                                    + "§7 didn't exist yet — created it.");
-
-                            String modeDesc = actualMode.equals("void") ? "§7void§a " : "";
-                            player.sendMessage("§aSpawned §e" + bots.size() + "§a " + modeDesc + "PvPBots"
-                                    + (faction != null ? " §7in faction §e" + faction.toLowerCase() : "")
-                                    + (kit != null ? " §7wearing kit §e" + kit.toLowerCase() : "")
-                                    + "§a.");
-                            return true;
-                        } catch (NumberFormatException e) {
-                            player.sendMessage("§cInvalid number. Usage: /pvpbot massspawn <number> <faction> void/normal/random [kit]");
-                            return true;
-                        }
-                    }
+            case "masspawn", "massspawn", "masspawnrandom", "masspawnvoid",
+                 "masspawnneutral", "masspawnfrozen", "masspawngrid" -> {
+                // One syntax only: /pvpbot masspawn<variant> <number> [kit] [faction] [difficulty]
+                // ("massspawn" is only kept as a typo-tolerant alias of "masspawn").
+                String variant = baseCmd.equals("massspawn") ? "" : baseCmd.substring("masspawn".length());
+                String shownCmd = baseCmd.equals("massspawn") ? "masspawn" : baseCmd;
+                String usage = "/pvpbot " + shownCmd + " <number> [kit] [faction] [difficulty]";
+                if (args.length < 2) {
+                    player.sendMessage("§cUsage: §f" + usage);
+                    player.sendMessage("§7Use §fnone§7 to skip the kit or faction. "
+                            + "Difficulty can be mixed, e.g. §f50%easy,35%normal,15%expert");
+                    return true;
+                }
+                if (args.length > 5) {
+                    player.sendMessage("§cToo many arguments. Usage: §f" + usage);
+                    return true;
                 }
 
-                // Original massspawn logic
-                NameGenerator.NameStyle style = baseCmd.equals("masspawnrandom")
-                        ? NameGenerator.NameStyle.ALT
-                        : NameGenerator.NameStyle.CLEAN;
-                boolean neutral = baseCmd.endsWith("neutral");
-                boolean frozenSpawn = baseCmd.endsWith("frozen");
-
-                int count = 5;
-                if (args.length >= 2) {
-                    try {
-                        count = Integer.parseInt(args[1]);
-                    } catch (NumberFormatException e) {
-                        player.sendMessage("§cInvalid number. Usage: /pvpbot masspawn <count> [faction] [kit] [grid] [spacing] [difficulty]");
-                        return true;
-                    }
-                    if (count < 1) {
-                        player.sendMessage("§cCount must be at least 1.");
-                        return true;
-                    }
-                    count = Math.min(count, 50);
+                int count;
+                try {
+                    count = Integer.parseInt(args[1]);
+                } catch (NumberFormatException e) {
+                    player.sendMessage("§c'§e" + args[1] + "§c' isn't a number. Usage: §f" + usage);
+                    return true;
                 }
-
-                boolean grid = false;
-                String factionArg = null;
-                String kitArg = null;
-                double spacing = FormationManager.DEFAULT_SPACING;
-                WeightedSpec difficultySpec = null;
-
-                for (int i = 2; i < args.length; i++) {
-                    String token = args[i];
-                    if (token.equalsIgnoreCase("grid") || token.equalsIgnoreCase("formation")) {
-                        grid = true;
-                        continue;
-                    }
-
-                    if (WeightedSpec.looksLikeSpec(token) || parseDifficulty(token) != null) {
-                        WeightedSpec parsed = parseDifficultySpec(player, token);
-                        if (parsed == null) return true;
-                        difficultySpec = parsed;
-                        continue;
-                    }
-                    Double asSpacing = tryParseDouble(token);
-                    if (asSpacing != null) {
-                        if (asSpacing < 0.5 || asSpacing > 16.0) {
-                            player.sendMessage("§cSpacing must be between 0.5 and 16 blocks.");
-                            return true;
-                        }
-                        spacing = asSpacing;
-                        grid = true;
-                        continue;
-                    }
-                    if (token.equalsIgnoreCase("kit") && i + 1 < args.length) {
-                        kitArg = args[++i];
-                        continue;
-                    }
-                    if (token.regionMatches(true, 0, "kit:", 0, 4) && token.length() > 4) {
-                        kitArg = token.substring(4);
-                        continue;
-                    }
-                    if (factionArg == null) {
-                        factionArg = token;
-                    } else {
-                        player.sendMessage("§cDon't know what to do with §e" + token
-                                + "§c. Usage: /pvpbot masspawn <count> [faction] [kit] [grid] [spacing] [difficulty]");
-                        return true;
-                    }
+                if (count < 1) {
+                    player.sendMessage("§cCount must be at least 1.");
+                    return true;
                 }
+                count = Math.min(count, 50);
 
-                if (kitArg != null && !kitManager.kitExists(kitArg)) {
-                    player.sendMessage("§cNo kit named §e" + kitArg + "§c. Spawning without one.");
-                    kitArg = null;
-                }
+                SpawnOptions opts = parseSpawnOptions(player, args, 2, usage);
+                if (opts == null) return true;
 
-                boolean created = factionArg != null && !manager.factionExists(factionArg);
-
+                boolean created = opts.faction() != null && !manager.factionExists(opts.faction());
+                boolean grid = variant.equals("grid");
                 var bots = grid
-                        ? manager.massSpawnGrid(player.getLocation(), count, spacing, factionArg, style)
-                        : manager.massSpawn(player.getLocation(), count, factionArg, style);
+                        ? manager.massSpawnGrid(player.getLocation(), count,
+                                FormationManager.DEFAULT_SPACING, opts.faction(), NameGenerator.NameStyle.CLEAN)
+                        : manager.massSpawn(player.getLocation(), count, opts.faction(), spawnNameStyle(variant));
 
-                if (kitArg != null) {
-                    for (PvPBot b : bots) b.equipKit(kitArg);
+                applySpawnVariant(manager, bots, variant);
+                if (opts.kit() != null) {
+                    for (PvPBot b : bots) b.equipKit(opts.kit());
                 }
+                String spread = applySpawnDifficulty(manager, bots, opts.difficulty());
 
-                if (created) player.sendMessage("§7Faction §e" + factionArg.toLowerCase()
+                if (created) player.sendMessage("§7Faction §e" + opts.faction().toLowerCase()
                         + "§7 didn't exist yet — created it.");
-
-                if (neutral) {
-                    for (PvPBot b : bots) manager.getBotSettings(b.getUUID()).setHostile(false);
-                }
-                if (frozenSpawn) {
-                    for (PvPBot b : bots) {
-                        var st = manager.getBotSettings(b.getUUID());
-                        st.setFrozen(true);
-                        st.setHostile(false);
-                    }
-                }
-
-                String spread = null;
-                if (difficultySpec != null) {
-                    java.util.Map<String, Integer> rolled = new java.util.LinkedHashMap<>();
-                    for (PvPBot b : bots) {
-                        BotDifficulty diff = parseDifficulty(difficultySpec.roll());
-                        if (diff == null) continue;
-                        manager.getBotSettings(b.getUUID()).applyDifficulty(diff);
-                        rolled.merge(diff.name().toLowerCase(), 1, Integer::sum);
-                    }
-                    StringBuilder sb = new StringBuilder();
-                    for (var e : rolled.entrySet()) {
-                        if (sb.length() > 0) sb.append("§7, ");
-                        sb.append("§e").append(e.getValue()).append("§7x ").append(e.getKey());
-                    }
-                    spread = sb.toString();
-                }
-
-                player.sendMessage("§aSpawned §e" + bots.size() + "§a PvPBots"
-                        + (grid ? " §7(grid, " + spacing + "b spacing)" : "")
-                        + (factionArg != null ? " §7in faction §e" + factionArg.toLowerCase() : "")
-                        + (kitArg != null ? " §7wearing kit §e" + kitArg.toLowerCase() : "")
+                player.sendMessage("§aSpawned §e" + bots.size() + "§a " + spawnVariantLabel(variant) + "PvPBots"
+                        + (grid ? " §7(grid, " + FormationManager.DEFAULT_SPACING + "b spacing)" : "")
+                        + (opts.kit() != null ? " §7wearing kit §e" + opts.kit().toLowerCase() : "")
+                        + (opts.faction() != null ? " §7in faction §e" + opts.faction().toLowerCase() : "")
                         + "§a.");
                 if (spread != null) player.sendMessage("  §7difficulty: " + spread);
+                sendSpawnVariantHint(player, variant);
             }
 
             case "remove" -> {
@@ -2844,7 +2664,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             spec = WeightedSpec.parse(token);
         } catch (WeightedSpec.SpecException e) {
             player.sendMessage("§c" + e.getMessage());
-            player.sendMessage("§7Example: §f/pvpbot masspawn 20 50%easy,35%normal,15%insane");
+            player.sendMessage("§7Example: §f/pvpbot masspawn 20 none none 50%easy,35%normal,15%expert");
             return null;
         }
         for (WeightedSpec.Entry entry : spec.entries()) {
@@ -3120,12 +2940,13 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
 
     private void sendUsage(Player player) {
         player.sendMessage("§6§lPvPBot Commands:");
-        player.sendMessage("§e /pvpbot spawn [faction] [kit] §7| §espawnrandom [faction] [kit] §8(random mash names) §7| §espawnneutral §8(won't fight)");
-        player.sendMessage("§e /pvpbot spawnfrozen [faction] §8(training dummy — won't move or fight, still takes hits)");
+        player.sendMessage("§e /pvpbot spawn [kit] [faction] [difficulty] §8(§fnone§8 skips kit/faction)");
+        player.sendMessage("§8   variants, same arguments: §espawnrandom §8(mash names) §7| §espawnvoid §8(void names) §7| §espawnneutral §8(won't fight) §7| §espawnfrozen §8(training dummy)");
         player.sendMessage("§e /pvpbot schematic list|info|preview <name> §8(preview is client-side only)");
         player.sendMessage("§e /pvpbot faction schematic [faction] <name> build|stop|status");
         player.sendMessage("§e /pvpbot path create <name> §7| §epath point create §7| §epath walk <bot> [sprint]");
-        player.sendMessage("§e /pvpbot masspawn <count> [faction] [kit] [grid] [spacing] [difficulty] §7| §emasspawnrandom <count> ...");
+        player.sendMessage("§e /pvpbot masspawn <number> [kit] [faction] [difficulty] §8(difficulty can mix: 50%easy,50%hard)");
+        player.sendMessage("§8   variants, same arguments: §emasspawnrandom §7| §emasspawnvoid §7| §emasspawnneutral §7| §emasspawnfrozen §7| §emasspawngrid §8(spawns in a grid)");
         player.sendMessage("§e /pvpbot group create <faction> <groupname> <amount> §8(pulls existing bots into their own squad)");
         player.sendMessage("§e /pvpbot group <groupname> leader add/remove <player> §7| §edisband <groupname> §7| §elist §7| §einfo <groupname>");
         player.sendMessage("§8   a group's leader overrides the faction leader for its own members only");
@@ -3167,42 +2988,130 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         return Double.parseDouble(token);
     }
 
-    private static boolean isMassSpawn(String cmd) {
-        return cmd.equals("masspawn")
-                || cmd.equals("massspawn")
-                || cmd.equals("masspawnrandom")
-                || cmd.equals("masspawnneutral")
-                || cmd.equals("masspawnfrozen");
+    // =====================================================================
+    // spawn / masspawn: one argument order for every variant
+    //   /pvpbot spawn<variant>             [kit] [faction] [difficulty]
+    //   /pvpbot masspawn<variant> <number> [kit] [faction] [difficulty]
+    // "none" skips the kit or faction slot.
+    // =====================================================================
+
+    private static final String SKIP_ARG = "none";
+
+    private static final List<String> SPAWN_COMMANDS = List.of(
+            "spawn", "spawnrandom", "spawnvoid", "spawnneutral", "spawnfrozen");
+
+    private static final List<String> MASSPAWN_COMMANDS = List.of(
+            "masspawn", "masspawnrandom", "masspawnvoid", "masspawnneutral",
+            "masspawnfrozen", "masspawngrid");
+
+    private record SpawnOptions(String kit, String faction, WeightedSpec difficulty) { }
+
+    // Reads [kit] [faction] [difficulty] starting at args[start]. Sends the
+    // player an error and returns null if any of them is invalid.
+    private SpawnOptions parseSpawnOptions(Player player, String[] args, int start, String usage) {
+        String kit = start < args.length ? args[start] : null;
+        String faction = start + 1 < args.length ? args[start + 1] : null;
+        String difficultyArg = start + 2 < args.length ? args[start + 2] : null;
+
+        if (kit != null && kit.equalsIgnoreCase(SKIP_ARG)) kit = null;
+        if (faction != null && faction.equalsIgnoreCase(SKIP_ARG)) faction = null;
+
+        if (kit != null && !plugin.getKitManager().kitExists(kit)) {
+            player.sendMessage("§cNo kit named §e" + kit + "§c. Usage: §f" + usage);
+            List<String> kits = kitNames();
+            player.sendMessage(kits.isEmpty()
+                    ? "§7No kits exist yet — use §fnone§7 to spawn without one."
+                    : "§7Kits: §f" + String.join("§7, §f", kits) + "§7 (or §fnone§7)");
+            return null;
+        }
+
+        WeightedSpec difficulty = null;
+        if (difficultyArg != null) {
+            difficulty = parseDifficultySpec(player, difficultyArg);
+            if (difficulty == null) return null;
+        }
+        return new SpawnOptions(kit, faction, difficulty);
     }
 
-    private List<String> massSpawnCompletions(BotManager mgr, String[] args) {
+    private static NameGenerator.NameStyle spawnNameStyle(String variant) {
+        return switch (variant) {
+            case "random" -> NameGenerator.NameStyle.ALT;
+            case "void" -> NameGenerator.NameStyle.VOID;
+            default -> NameGenerator.NameStyle.CLEAN;
+        };
+    }
+
+    private static void applySpawnVariant(BotManager manager, List<PvPBot> bots, String variant) {
+        for (PvPBot b : bots) {
+            var st = manager.getBotSettings(b.getUUID());
+            if (variant.equals("neutral")) {
+                st.setHostile(false);
+            } else if (variant.equals("frozen")) {
+                st.setFrozen(true);
+                st.setHostile(false);
+            }
+        }
+    }
+
+    // Rolls a difficulty per bot from the spec; returns a "2x easy, 1x hard"
+    // summary, or null when no difficulty was given.
+    private static String applySpawnDifficulty(BotManager manager, List<PvPBot> bots, WeightedSpec spec) {
+        if (spec == null) return null;
+        java.util.Map<String, Integer> rolled = new java.util.LinkedHashMap<>();
+        for (PvPBot b : bots) {
+            BotDifficulty diff = parseDifficulty(spec.roll());
+            if (diff == null) continue;
+            manager.getBotSettings(b.getUUID()).applyDifficulty(diff);
+            rolled.merge(diff.name().toLowerCase(), 1, Integer::sum);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (var e : rolled.entrySet()) {
+            if (sb.length() > 0) sb.append("§7, ");
+            sb.append("§e").append(e.getValue()).append("§7x ").append(e.getKey());
+        }
+        return sb.toString();
+    }
+
+    private static String spawnVariantLabel(String variant) {
+        return switch (variant) {
+            case "frozen" -> "§7frozen§a ";
+            case "neutral" -> "§7neutral§a ";
+            case "void" -> "§7void§a ";
+            default -> "";
+        };
+    }
+
+    private static void sendSpawnVariantHint(Player player, String variant) {
+        if (variant.equals("frozen")) {
+            player.sendMessage("§7Training dummy: won't move or fight, "
+                    + "but still takes damage and knockback. "
+                    + "Use §f/pvpbot settings§7 to adjust it in the GUI.");
+        } else if (variant.equals("neutral")) {
+            player.sendMessage("§7Wanders and won't fight. "
+                    + "Use §f/pvpbot settings§7 to turn hostile back on.");
+        }
+    }
+
+    // Tab completion for the [kit] [faction] [difficulty] slots. `slot` is
+    // 0 for kit, 1 for faction, 2 for difficulty; anything else is past the
+    // end of the command and gets no suggestions.
+    private List<String> spawnOptionCompletions(BotManager mgr, int slot) {
         List<String> out = new ArrayList<>();
-        boolean hasGrid = false;
-        boolean hasFaction = false;
-        boolean hasSpacing = false;
-        boolean hasKit = false;
-
-        boolean hasDifficulty = false;
-        for (int i = 2; i < args.length - 1; i++) {
-            String token = args[i];
-            if (token.equalsIgnoreCase("grid") || token.equalsIgnoreCase("formation")) hasGrid = true;
-            else if (WeightedSpec.looksLikeSpec(token) || parseDifficulty(token) != null) hasDifficulty = true;
-            else if (tryParseDouble(token) != null) hasSpacing = true;
-            else if (plugin.getKitManager() != null && plugin.getKitManager().kitExists(token)) hasKit = true;
-            else hasFaction = true;
+        switch (slot) {
+            case 0 -> {
+                out.addAll(kitNames());
+                out.add(SKIP_ARG);
+            }
+            case 1 -> {
+                var names = mgr.getFactionNames();
+                if (names.isEmpty()) out.addAll(List.of("red", "blue"));
+                else out.addAll(names);
+                out.add(SKIP_ARG);
+            }
+            case 2 -> out.addAll(List.of("easy", "normal", "hard", "expert",
+                    "50%easy,35%normal,15%expert"));
+            default -> { }
         }
-
-        if (!hasGrid) out.add("grid");
-        if (!hasDifficulty) {
-            out.addAll(List.of("50%easy,35%normal,15%insane", "easy", "normal", "hard", "expert"));
-        }
-        if (!hasFaction) {
-            var names = mgr.getFactionNames();
-            if (names.isEmpty()) out.addAll(List.of("red", "blue"));
-            else out.addAll(names);
-        }
-        if (!hasKit) out.addAll(kitNames());
-        if (hasGrid && !hasSpacing) out.addAll(List.of("2", "3", "4"));
         return out;
     }
 
@@ -3353,12 +3262,23 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
 
         if (args.length == 1) {
             completions.addAll(List.of("schematic", "path", "portals",
-                    "spawn", "spawnrandom", "spawnneutral", "spawnfrozen",
-                    "masspawn", "massspawn", "masspawnrandom",
-                    "masspawnneutral", "masspawnfrozen",
+                    "spawn", "spawnrandom", "spawnvoid", "spawnneutral", "spawnfrozen",
+                    "masspawn", "masspawnrandom", "masspawnvoid",
+                    "masspawnneutral", "masspawnfrozen", "masspawngrid",
                     "remove", "removeall", "settings", "list", "difficulty",
                     "kit", "faction", "group", "cinematic", "golem", "give", "set", "debug", "performance",
                     "guard", "attack", "deliver", "mine", "farm", "checkchest"));
+        }
+
+        // spawn / masspawn get one fixed argument order, handled here and
+        // nowhere else so no out-of-order suggestions leak in below.
+        else if (SPAWN_COMMANDS.contains(args[0].toLowerCase())) {
+            completions.addAll(spawnOptionCompletions(mgr, args.length - 2));
+        }
+        else if (MASSPAWN_COMMANDS.contains(args[0].toLowerCase())
+                || args[0].equalsIgnoreCase("massspawn")) {
+            if (args.length == 2) completions.addAll(List.of("5", "10", "25", "50"));
+            else completions.addAll(spawnOptionCompletions(mgr, args.length - 3));
         }
 
         else if (args.length == 2) {
@@ -3400,12 +3320,6 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                     for (Player online : Bukkit.getOnlinePlayers()) {
                         completions.add(org.bukkit.ChatColor.stripColor(online.getName()));
                     }
-                }
-                case "masspawn", "masspawnrandom", "masspawnneutral", "masspawnfrozen" ->
-                        completions.addAll(List.of("5", "10", "25", "50"));
-                case "spawn", "spawnrandom", "spawnneutral", "spawnfrozen" -> {
-                    completions.addAll(mgr.getFactionNames());
-                    if (completions.isEmpty()) completions.addAll(List.of("red", "blue"));
                 }
             }
         }
@@ -3520,10 +3434,6 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             else if (baseCmd.equals("golem")) {
                 completions.addAll(List.of("fight", "stop"));
             }
-
-            else if (isMassSpawn(baseCmd)) {
-                completions.addAll(massSpawnCompletions(mgr, args));
-            }
         }
 
         else if (args.length == 4) {
@@ -3617,10 +3527,6 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             else if (baseCmd.equals("cinematic") && secondArg.equals("circle")) {
                 completions.addAll(mgr.getFactionNames());
             }
-
-            else if (isMassSpawn(baseCmd)) {
-                completions.addAll(massSpawnCompletions(mgr, args));
-            }
         }
 
         else if (args.length == 5
@@ -3638,9 +3544,6 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 && args[1].equalsIgnoreCase("group")
                 && args[3].equalsIgnoreCase("formation")) {
             completions.add("grid");
-        }
-        else if (args.length == 5 && isMassSpawn(args[0].toLowerCase())) {
-            completions.addAll(massSpawnCompletions(mgr, args));
         }
 
         else if (args.length >= 5
