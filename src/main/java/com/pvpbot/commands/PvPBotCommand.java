@@ -850,6 +850,9 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             for (PvPBot b : botManager.getFactionBots(faction)) {
                 b.getAI().getContext().buildController.abort();
             }
+            // The job stops ticking once it's out of the map, so clear any
+            // scaffold (pillars/bridges) right now rather than leave it.
+            existing.removeScaffoldNow((java.util.UUID) null);
             sender.sendMessage("§eStopped the build. §7" + existing.completed()
                     + "/" + existing.total() + " blocks were placed — what's up stays up.");
             return;

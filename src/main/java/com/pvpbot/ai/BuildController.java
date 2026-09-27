@@ -1,5 +1,6 @@
 package com.pvpbot.ai;
 
+import com.pvpbot.nav.ScaffoldPlanner;
 import com.pvpbot.schem.BuildJob;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -12,7 +13,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffectType;
 
 public class BuildController {
-    private enum Phase { IDLE, GOTO, CLEAR, PLACE }
+    private enum Phase { IDLE, GOTO, CLEAR, PLACE, SCAFFOLD, TEARDOWN }
 
     private static final double REACH = 4.0;
 
@@ -30,12 +31,34 @@ public class BuildController {
 
     private int repathCooldown = 0;
     private int blockedCooldown = 0;
-    private int pillarDelay = 0;
-
-    private int pillarBaseY = Integer.MIN_VALUE;
-    private int pillarBaseX, pillarBaseZ;
 
     private int lastGroundX, lastGroundY = Integer.MIN_VALUE, lastGroundZ;
+
+    // ---- scaffold plan (bridge / pillar / walk moves to reach a task) ----
+    private java.util.List<ScaffoldPlanner.Step> plan;
+    private int planIdx = 0;
+    private int planStepTicks = 0;
+    private int planAirTicks = 0;
+    private int planFailures = 0;
+    private int planCooldown = 0;
+    private int prevStepX, prevStepY, prevStepZ;
+    private int pillarPlaceDelay = 0;
+
+    // ---- teardown of this bot's own scaffold ----
+    private BuildJob.Scaffold teardownTarget;
+    private int teardownTicks = 0;
+
+    private boolean sneaking = false;
+
+    // Horizontal range inside which a stuck/high/cut-off task gets a
+    // scaffold plan instead of more path-finding.
+    private static final double SCAFFOLD_RANGE = 14.0;
+    private static final int PLAN_PAD = 10;
+    private static final int PLAN_BUDGET = 5000;
+    private static final int WALK_STEP_TIMEOUT = 60;
+    private static final int PLACE_STEP_TIMEOUT = 80;
+    private static final int TEARDOWN_BLOCK_TIMEOUT = 160;
+    private static final int MAX_PLAN_FAILURES = 3;
 
     private BuildJob.Task avoidTask;
     private int avoidTicksLeft = 0;
@@ -59,39 +82,36 @@ public class BuildController {
 
     public String debugLine() {
         if (job == null) return "no job";
+        int mine = job.scaffoldOf(context.bot.getUUID()).size();
+        String scaffoldInfo = " scaffold=" + mine + "/" + job.scaffoldCount()
+                + (plan != null ? " plan=" + planIdx + "/" + plan.size()
+                + "(" + plan.get(Math.min(planIdx, plan.size() - 1)).kind() + ")" : "")
+                + " planFails=" + planFailures;
         if (task == null) {
             return "idle/" + phase
                     + (blockedCooldown > 0 ? " blocked:" + blockedCooldown : "")
                     + (avoidTask != null ? " avoiding-a-task" : "")
+                    + scaffoldInfo
                     + " needs:" + job.nextNeededMaterial();
         }
 
         ServerPlayer handle = context.bot.getHandle();
         if (handle == null) return "no handle";
 
-        int feetY = (int) Math.floor(handle.getY());
+        int feetY = feetCellY(handle);
         double dx = task.x + 0.5 - handle.getX();
         double dz = task.z + 0.5 - handle.getZ();
         double horizSq = dx * dx + dz * dz;
         double dy = task.y + 0.5 - (handle.getY() + handle.getEyeHeight());
         double distSq = horizSq + dy * dy;
 
-        boolean walking = distSq > REACH_SQ;
-        boolean mustClimb = task.y - feetY >= 3;
-        Location dest = standingSpotFor(task, feetY);
-        boolean aerial = dest.getY() - feetY > 1.5;
-        boolean grinding = context.wallBumpTicks > 8;
-        boolean climbs = mustClimb && horizSq < 36.0 && (horizSq < 9.0 || aerial || grinding);
-
         return phase
                 + " task(" + task.x + "," + task.y + "," + task.z + ")"
                 + " feetY=" + feetY
                 + " up=" + (task.y - feetY)
                 + String.format(" d2=%.1f h2=%.1f", distSq, horizSq)
-                + (walking ? " WALKING" : " IN-REACH")
-                + " climb[must=" + mustClimb + " aerial=" + aerial
-                + " grind=" + grinding + "]=" + climbs
-                + (climbs ? " base=" + pillarBaseY + " onGround=" + handle.onGround() : "")
+                + (distSq > REACH_SQ ? " WALKING" : " IN-REACH")
+                + scaffoldInfo
                 + " path=" + (context.currentPath.isEmpty()
                 ? "none" : context.pathNodeIndex + "/" + context.currentPath.size())
                 + " stuck=" + arrival.stalledFor() + " tries=" + failedApproaches
@@ -104,12 +124,18 @@ public class BuildController {
     }
 
     public boolean isBusy() {
-        return hasJob() && phase != Phase.IDLE;
+        // Still busy while taking our scaffold down after the build is done.
+        return (hasJob() && phase != Phase.IDLE)
+                || (job != null && phase == Phase.TEARDOWN);
     }
 
     public void abort() {
         clearDestroyStage();
         if (job != null && task != null) job.release(task);
+        // Leaving the job for good (stopped, bot removed, reassigned): pop
+        // any scaffold we still own straight out of the world so no
+        // pillars/bridges are left behind.
+        if (job != null) job.removeScaffoldNow(context.bot.getUUID());
         job = null;
         reset();
     }
@@ -121,8 +147,13 @@ public class BuildController {
         breaking = null;
         breakTicksElapsed = 0;
         breakTicksTotal = 0;
-        pillarBaseY = Integer.MIN_VALUE;
         losBlockedByBuild = false;
+        plan = null;
+        planIdx = 0;
+        planFailures = 0;
+        teardownTarget = null;
+        teardownTicks = 0;
+        setSneak(false);
         arrival.cancel();
         failedApproaches = 0;
         avoidTask = null;
@@ -137,25 +168,45 @@ public class BuildController {
         if (restockCooldown > 0) restockCooldown--;
         if (avoidTicksLeft > 0 && --avoidTicksLeft == 0) avoidTask = null;
 
+        if (planCooldown > 0) planCooldown--;
+        if (pillarPlaceDelay > 0) pillarPlaceDelay--;
+
         if (job == null) return false;
-        if (job.isFinished()) {
+        if (botPlayer == null) { abort(); return false; }
+        job.heartbeat(context.bot.getUUID());
+
+        if (job.isCancelled()) {
             abort();
             return false;
         }
-        if (botPlayer == null) { abort(); return false; }
 
         if (context.target != null || context.fleeing) {
             if (task != null) {
                 job.release(task);
                 task = null;
-                phase = Phase.IDLE;
                 clearDestroyStage();
             }
+            plan = null;
+            phase = Phase.IDLE;
+            teardownTarget = null;
+            setSneak(false);
             return false;
         }
 
         ServerPlayer handle = context.bot.getHandle();
         if (handle == null) { abort(); return false; }
+
+        // Build done: take our own scaffold down before leaving the job.
+        if (job.isFinished()) {
+            if (!job.scaffoldOf(context.bot.getUUID()).isEmpty()) {
+                if (task != null) { job.release(task); task = null; }
+                phase = Phase.TEARDOWN;
+                runTeardown(botPlayer, handle);
+                return true;
+            }
+            abort();
+            return false;
+        }
 
         if (handle.onGround()) {
             lastGroundX = (int) Math.floor(handle.getX());
@@ -170,10 +221,37 @@ public class BuildController {
             return true;
         }
 
+        if (phase == Phase.TEARDOWN) {
+            if (runTeardown(botPlayer, handle)) return true;
+            phase = Phase.IDLE;
+        }
+
         if (task == null) {
             if (!acquireTask(botPlayer, handle)) {
                 context.forwardInput = 0f;
                 context.strafeInput = 0f;
+                return true;
+            }
+            // Holding scaffold from an earlier task: keep it only if the new
+            // task can be done from right here, otherwise take it down first
+            // (it would just be litter, and a reason to get stuck later).
+            if (!job.scaffoldOf(context.bot.getUUID()).isEmpty()
+                    && !canWorkFromHere(handle, task)) {
+                job.release(task);
+                task = null;
+                plan = null;
+                phase = Phase.TEARDOWN;
+                runTeardown(botPlayer, handle);
+                return true;
+            }
+        }
+
+        if (plan != null) {
+            if (target(task).getBlockData().matches(task.data)) {
+                plan = null;
+                setSneak(false);
+            } else {
+                executePlan(botPlayer, handle);
                 return true;
             }
         }
@@ -228,6 +306,9 @@ public class BuildController {
         }
         if (losBlockedByBuild) {
             losBlockedTicks++;
+            if (losBlockedTicks > 10 && planCooldown <= 0 && tryStartPlan(botPlayer, handle)) {
+                return true;
+            }
             if (losBlockedTicks > 140) {
                 losBlockedTicks = 0;
                 repositionOrDrop();
@@ -331,7 +412,7 @@ public class BuildController {
             Material m = job.world.getBlockAt(cx, cy, cz).getType();
             if (m.isAir() || isReplaceable(m) || !m.isSolid()) continue;
 
-            if (job.isBuildCell(cx, cy, cz)) {
+            if (job.isBuildCell(cx, cy, cz) || job.isScaffoldCell(cx, cy, cz)) {
                 losBlockedByBuild = true;
                 return null;
             }
@@ -384,19 +465,22 @@ public class BuildController {
 
     private void walkTo(Player botPlayer, ServerPlayer handle, BuildJob.Task t,
                         boolean forcePath) {
-        int feetY = (int) Math.floor(handle.getY());
+        int feetY = feetCellY(handle);
         double horizSq = Math.pow(t.x + 0.5 - handle.getX(), 2)
                 + Math.pow(t.z + 0.5 - handle.getZ(), 2);
 
         Location dest = standingSpotFor(t, feetY);
         Location loc = botPlayer.getLocation();
 
+        // Close to the task but it's up high, there's no floor to stand on
+        // next to it, the bot is grinding into something, or walking has
+        // already stalled: plan a route that may bridge out and/or pillar up.
         boolean mustClimb = t.y - feetY >= 3;
-        boolean aerialSpot = dest.getY() - feetY > 1.5;
+        boolean aerialSpot = dest.getY() - feetY > 1.5 || !hasFloor(dest);
         boolean grinding = context.wallBumpTicks > 8;
-        if (mustClimb && horizSq < 36.0 && (horizSq < 9.0 || aerialSpot || grinding)) {
-            phase = Phase.PLACE;
-            pillarUp(botPlayer, handle);
+        boolean near = horizSq < SCAFFOLD_RANGE * SCAFFOLD_RANGE;
+        if (near && (mustClimb || aerialSpot || grinding || failedApproaches >= 1 || forcePath)
+                && planCooldown <= 0 && tryStartPlan(botPlayer, handle)) {
             return;
         }
 
@@ -480,85 +564,31 @@ public class BuildController {
         return best != null ? best : new Location(job.world, t.x + 0.5, t.y, t.z + 0.5);
     }
 
-    private void pillarUp(Player botPlayer, ServerPlayer handle) {
-        context.forwardInput = 0f;
-        context.strafeInput = 0f;
-        context.movementController.easePitchTo(85f);
-
-        if (pillarDelay > 0) {
-            pillarDelay--;
-            return;
-        }
-
-        if (lastGroundY == Integer.MIN_VALUE) return;
-
-        if (handle.onGround()) {
-            pillarBaseX = lastGroundX;
-            pillarBaseY = lastGroundY;
-            pillarBaseZ = lastGroundZ;
-            context.movementController.requestJump();
-            return;
-        }
-
-        if (pillarBaseY == Integer.MIN_VALUE) {
-            pillarBaseX = lastGroundX;
-            pillarBaseY = lastGroundY;
-            pillarBaseZ = lastGroundZ;
-        }
-
-        if (handle.getY() < pillarBaseY + 1.0) return;
-
-        if ((int) Math.floor(handle.getX()) != pillarBaseX
-                || (int) Math.floor(handle.getZ()) != pillarBaseZ) {
-            return;
-        }
-
-        Block under = job.world.getBlockAt(pillarBaseX, pillarBaseY, pillarBaseZ);
-        if (!under.getType().isAir() && !isReplaceable(under.getType())) return;
-
-        int slot = context.inventoryController.ensureInHotbar(
-                botPlayer, it -> it.getType() == com.pvpbot.schem.BuildJob.SCAFFOLD);
-        if (slot < 0) slot = context.inventoryController.findBlockSlot(botPlayer);
-        if (slot < 0) return;
-        if (slot <= 8) botPlayer.getInventory().setHeldItemSlot(slot);
-
-        ItemStack held = botPlayer.getInventory().getItem(slot);
-        if (held == null) return;
-        Material m = held.getType();
-
-        org.bukkit.block.BlockState replaced = under.getState();
-        under.setType(m, true);
-
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        under, replaced, under.getRelative(0, -1, 0),
-                        held.clone(), botPlayer, true,
-                        org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
-            replaced.update(true, false);
-
-            if (task != null) job.release(task);
-            task = null;
-            phase = Phase.IDLE;
-            blockedCooldown = 40;
-            pillarBaseY = Integer.MIN_VALUE;
-            return;
-        }
-
-        consumeOne(botPlayer, slot);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        pillarBaseY = Integer.MIN_VALUE;
-        pillarDelay = 2;
-    }
-
     private void mine(Player botPlayer, ServerPlayer handle, Block block, boolean isTargetCell) {
         if (!isTargetCell && job.isBuildCell(block.getX(), block.getY(), block.getZ())) {
             repositionOrDrop();
             return;
         }
 
+        int result = breakStep(botPlayer, handle, block);
+        if (result == BREAK_CANCELLED) {
+            if (isTargetCell) {
+                job.complete(task);
+                task = null;
+                phase = Phase.IDLE;
+            } else {
+                repositionOrDrop();
+            }
+        }
+    }
+
+    private static final int BREAK_IN_PROGRESS = 0;
+    private static final int BREAK_DONE = 1;
+    private static final int BREAK_CANCELLED = -1;
+
+    // One tick of mining `block` with the right tool, crack animation and a
+    // proper BlockBreakEvent at the end (so protection plugins still apply).
+    private int breakStep(Player botPlayer, ServerPlayer handle, Block block) {
         if (breaking == null || !breaking.equals(block)) {
             clearDestroyStage();
             breaking = block;
@@ -575,7 +605,7 @@ public class BuildController {
         breakTicksElapsed++;
         sendDestroyStage(block, (breakTicksElapsed * 10) / Math.max(1, breakTicksTotal));
 
-        if (breakTicksElapsed < breakTicksTotal) return;
+        if (breakTicksElapsed < breakTicksTotal) return BREAK_IN_PROGRESS;
 
         clearDestroyStage();
         breaking = null;
@@ -583,23 +613,17 @@ public class BuildController {
         org.bukkit.event.block.BlockBreakEvent event =
                 new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
         org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
-            if (isTargetCell) {
-                job.complete(task);
-                task = null;
-                phase = Phase.IDLE;
-            } else {
-                repositionOrDrop();
-            }
-            return;
-        }
+        if (event.isCancelled()) return BREAK_CANCELLED;
 
-        block.setType(Material.AIR, false);
+        block.setType(Material.AIR, true);
+        return BREAK_DONE;
     }
 
     private void repositionOrDrop() {
         clearDestroyStage();
         breaking = null;
+        plan = null;
+        setSneak(false);
         if (task != null) {
             job.release(task);
             avoidTask = task;
@@ -668,6 +692,500 @@ public class BuildController {
         phase = Phase.IDLE;
 
         placeDelay = 5;
+    }
+
+    // =====================================================================
+    // Scaffold planning & execution
+    // =====================================================================
+
+    private Block target(BuildJob.Task t) {
+        return job.world.getBlockAt(t.x, t.y, t.z);
+    }
+
+    private static int feetCellY(ServerPlayer handle) {
+        return (int) Math.floor(handle.getY() + 1.0e-3);
+    }
+
+    private boolean hasFloor(Location spot) {
+        return job.world.getBlockAt(spot.getBlockX(), spot.getBlockY() - 1, spot.getBlockZ())
+                .getType().isSolid();
+    }
+
+    private boolean canWorkFromHere(ServerPlayer handle, BuildJob.Task t) {
+        double ex = handle.getX(), ey = handle.getY() + handle.getEyeHeight(), ez = handle.getZ();
+        double dx = t.x + 0.5 - ex, dy = t.y + 0.5 - ey, dz = t.z + 0.5 - ez;
+        if (dx * dx + dy * dy + dz * dz > REACH_SQ) return false;
+        return ScaffoldPlanner.clearSight(new LiveTerrain(), ex, ey, ez, t.x, t.y, t.z);
+    }
+
+    private boolean tryStartPlan(Player botPlayer, ServerPlayer handle) {
+        if (task == null || !handle.onGround()) return false;
+        planCooldown = 30;
+
+        int fx = (int) Math.floor(handle.getX());
+        int fz = (int) Math.floor(handle.getZ());
+        int fy = feetCellY(handle);
+        LiveTerrain terrain = new LiveTerrain();
+        // Standing on a slab/path block puts the feet cell inside it.
+        if (!terrain.passable(fx, fy, fz)) fy++;
+
+        java.util.List<ScaffoldPlanner.Step> p = ScaffoldPlanner.plan(terrain,
+                fx, fy, fz, task.x, task.y, task.z, REACH, PLAN_PAD, PLAN_BUDGET);
+        if (p == null || p.isEmpty()) {
+            if (p == null) planFailures++;
+            if (planFailures >= MAX_PLAN_FAILURES) {
+                planFailures = 0;
+                repositionOrDrop();
+            }
+            return false;
+        }
+
+        int blocksNeeded = 0;
+        for (ScaffoldPlanner.Step st : p) if (st.placesBlock()) blocksNeeded++;
+        if (blocksNeeded > 0 && countScaffold(botPlayer) < blocksNeeded) {
+            job.supply(botPlayer, BuildJob.SCAFFOLD, Math.max(32, blocksNeeded));
+        }
+
+        plan = p;
+        planIdx = 0;
+        planStepTicks = 0;
+        planAirTicks = 0;
+        prevStepX = fx;
+        prevStepY = fy;
+        prevStepZ = fz;
+        phase = Phase.SCAFFOLD;
+        context.currentPath.clear();
+        context.pathNodeIndex = 0;
+        executePlan(botPlayer, handle);
+        return true;
+    }
+
+    private void executePlan(Player botPlayer, ServerPlayer handle) {
+        phase = Phase.SCAFFOLD;
+        context.suppressSprint = true;
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
+
+        if (planIdx >= plan.size()) {
+            finishPlan();
+            return;
+        }
+        ScaffoldPlanner.Step st = plan.get(planIdx);
+
+        int fx = (int) Math.floor(handle.getX());
+        int fz = (int) Math.floor(handle.getZ());
+        int fy = feetCellY(handle);
+        boolean onGround = handle.onGround();
+
+        planStepTicks++;
+        planAirTicks = onGround ? 0 : planAirTicks + 1;
+
+        int timeout = st.placesBlock() ? PLACE_STEP_TIMEOUT : WALK_STEP_TIMEOUT;
+        if (planStepTicks > timeout) {
+            failPlan();
+            return;
+        }
+        if (planAirTicks > 40) {
+            // Falling a long way means we left the plan entirely.
+            failPlan();
+            return;
+        }
+
+        if (onGround && fx == st.x() && fz == st.z() && fy == st.y()) {
+            prevStepX = st.x();
+            prevStepY = st.y();
+            prevStepZ = st.z();
+            planIdx++;
+            planStepTicks = 0;
+            if (planIdx >= plan.size()) finishPlan();
+            return;
+        }
+
+        // Knocked/slid off the plan (not on either end of the current move).
+        if (onGround && !nearCell(fx, fy, fz, st.x(), st.y(), st.z())
+                && !nearCell(fx, fy, fz, prevStepX, prevStepY, prevStepZ)) {
+            failPlan();
+            return;
+        }
+
+        switch (st.kind()) {
+            case WALK -> {
+                boolean flat = st.y() == prevStepY;
+                setSneak(flat && (job.isScaffoldCell(st.x(), st.y() - 1, st.z())
+                        || job.isScaffoldCell(prevStepX, prevStepY - 1, prevStepZ)));
+                double dist = steerTo(handle, st.x() + 0.5, st.z() + 0.5, sneaking ? 0.45f : 0.8f);
+                if (st.y() > fy && onGround && dist < 1.4) context.movementController.requestJump();
+            }
+            case BRIDGE -> {
+                Block floor = job.world.getBlockAt(st.x(), st.y() - 1, st.z());
+                if (!floor.getType().isSolid()) {
+                    if (fx != prevStepX || fz != prevStepZ || fy != prevStepY) {
+                        setSneak(true);
+                        steerTo(handle, prevStepX + 0.5, prevStepZ + 0.5, 0.45f);
+                        return;
+                    }
+                    setSneak(true);
+                    lookAtBlock(handle, st.x(), st.y() - 1, st.z());
+                    if (!placeScaffold(botPlayer, handle, floor, false, prevStepX, prevStepY, prevStepZ)) {
+                        failPlan();
+                    }
+                    return;
+                }
+                setSneak(true);
+                steerTo(handle, st.x() + 0.5, st.z() + 0.5, 0.45f);
+            }
+            case PILLAR -> {
+                setSneak(false);
+                context.movementController.easePitchTo(88f);
+                double cx = st.x() + 0.5, cz = st.z() + 0.5;
+                double off = Math.hypot(cx - handle.getX(), cz - handle.getZ());
+                if (off > 0.22 && onGround) {
+                    steerTo(handle, cx, cz, 0.3f);
+                    return;
+                }
+                Block under = job.world.getBlockAt(st.x(), st.y() - 1, st.z());
+                if (onGround && fy == st.y() - 1) {
+                    if (pillarPlaceDelay <= 0) context.movementController.requestJump();
+                    return;
+                }
+                if (!onGround && handle.getY() >= st.y() - 0.05
+                        && fx == st.x() && fz == st.z()
+                        && (under.getType().isAir() || isReplaceable(under.getType()))) {
+                    if (!placeScaffold(botPlayer, handle, under, true, st.x(), st.y(), st.z())) {
+                        failPlan();
+                        return;
+                    }
+                    pillarPlaceDelay = 2;
+                }
+            }
+        }
+    }
+
+    private static boolean nearCell(int x, int y, int z, int cx, int cy, int cz) {
+        return Math.abs(x - cx) <= 1 && Math.abs(z - cz) <= 1 && Math.abs(y - cy) <= 1;
+    }
+
+    private void finishPlan() {
+        plan = null;
+        planIdx = 0;
+        planFailures = 0;
+        phase = Phase.GOTO;
+        setSneak(false);
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
+    }
+
+    private void failPlan() {
+        plan = null;
+        planIdx = 0;
+        setSneak(false);
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
+        planCooldown = 20;
+        if (++planFailures >= MAX_PLAN_FAILURES) {
+            planFailures = 0;
+            repositionOrDrop();
+        } else {
+            phase = Phase.GOTO;
+        }
+    }
+
+    private int countScaffold(Player botPlayer) {
+        int n = 0;
+        for (ItemStack it : botPlayer.getInventory().getStorageContents()) {
+            if (it != null && it.getType() == BuildJob.SCAFFOLD) n += it.getAmount();
+        }
+        return n;
+    }
+
+    // Places one scaffold block (always the job's scaffold material, never a
+    // block the schematic needs), fires a real BlockPlaceEvent and records it
+    // in the job so it gets torn down later.
+    private boolean placeScaffold(Player botPlayer, ServerPlayer handle, Block cell, boolean pillar,
+                                  int standX, int standY, int standZ) {
+        if (job.isBuildCell(cell.getX(), cell.getY(), cell.getZ())) return false;
+
+        int slot = context.inventoryController.ensureInHotbar(
+                botPlayer, it -> it.getType() == BuildJob.SCAFFOLD);
+        if (slot < 0) {
+            job.supply(botPlayer, BuildJob.SCAFFOLD, 32);
+            slot = context.inventoryController.ensureInHotbar(
+                    botPlayer, it -> it.getType() == BuildJob.SCAFFOLD);
+        }
+        if (slot < 0 || slot > 8) return false;
+        botPlayer.getInventory().setHeldItemSlot(slot);
+        ItemStack held = botPlayer.getInventory().getItem(slot);
+        if (held == null) return false;
+
+        org.bukkit.block.BlockState replaced = cell.getState();
+        Block against = pillar ? cell.getRelative(0, -1, 0)
+                : job.world.getBlockAt(standX, standY - 1, standZ);
+        cell.setType(BuildJob.SCAFFOLD, true);
+
+        org.bukkit.event.block.BlockPlaceEvent event =
+                new org.bukkit.event.block.BlockPlaceEvent(
+                        cell, replaced, against, held.clone(), botPlayer, true,
+                        org.bukkit.inventory.EquipmentSlot.HAND);
+        org.bukkit.Bukkit.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            replaced.update(true, false);
+            return false;
+        }
+
+        consumeOne(botPlayer, slot);
+        handle.swing(InteractionHand.MAIN_HAND, true);
+        context.packetBroadcaster.broadcastAnimation(handle, 0);
+        try {
+            job.world.playSound(cell.getLocation(),
+                    cell.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
+        } catch (Throwable ignored) {
+        }
+        job.addScaffold(cell.getX(), cell.getY(), cell.getZ(), BuildJob.SCAFFOLD,
+                context.bot.getUUID(), pillar, standX, standY, standZ);
+        return true;
+    }
+
+    // =====================================================================
+    // Teardown: undo our own scaffold in reverse order of placement.
+    //   - a block under our feet with a safe landing below: dig down through
+    //     it (how you take a pillar down),
+    //   - otherwise walk back to where we stood when placing it (for a bridge
+    //     that's the previous bridge cell, still standing) and mine it.
+    // Anything we can't get to in time is popped out directly, so nothing is
+    // ever left behind and the bot can't get stuck on its own scaffold.
+    // Returns false once there's nothing left to take down.
+    // =====================================================================
+
+    private boolean runTeardown(Player botPlayer, ServerPlayer handle) {
+        java.util.List<BuildJob.Scaffold> mine = job.scaffoldOf(context.bot.getUUID());
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
+        context.suppressSprint = true;
+        if (mine.isEmpty()) {
+            teardownTarget = null;
+            setSneak(false);
+            clearDestroyStage();
+            breaking = null;
+            return false;
+        }
+
+        BuildJob.Scaffold sc = mine.get(mine.size() - 1);
+        Block block = job.world.getBlockAt(sc.x, sc.y, sc.z);
+        if (block.getType() != sc.material) {
+            job.removeScaffold(sc);
+            return true;
+        }
+        if (teardownTarget != sc) {
+            teardownTarget = sc;
+            teardownTicks = 0;
+            clearDestroyStage();
+            breaking = null;
+        }
+
+        // Someone else (another builder, a player) is standing on it: wait
+        // for them rather than pull the floor out from under them.
+        if (job.someoneStandsOn(sc, handle.getId())) {
+            if (++teardownTicks > TEARDOWN_BLOCK_TIMEOUT) {
+                sc.abandoned = true; // job clears it once they step off
+                teardownTarget = null;
+            }
+            return true;
+        }
+
+        if (++teardownTicks > TEARDOWN_BLOCK_TIMEOUT) {
+            giveBack(botPlayer, sc.material);
+            if (standingOn(handle, sc)) {
+                sc.abandoned = true; // job removes it once nobody is on it
+            } else {
+                job.removeScaffoldNow(sc);
+            }
+            teardownTarget = null;
+            return true;
+        }
+
+        int fx = (int) Math.floor(handle.getX());
+        int fz = (int) Math.floor(handle.getZ());
+        int fy = feetCellY(handle);
+
+        if (standingOn(handle, sc)) {
+            if (safeToDigDown(sc)) {
+                setSneak(false);
+                lookAtBlock(handle, sc.x, sc.y, sc.z);
+                mineScaffold(botPlayer, handle, block, sc);
+                return true;
+            }
+            // Digging would drop us somewhere bad: step back to where we
+            // stood when we placed it.
+            setSneak(true);
+            if (!(fx == sc.standX && fz == sc.standZ)) {
+                steerTo(handle, sc.standX + 0.5, sc.standZ + 0.5, 0.4f);
+            }
+            return true;
+        }
+
+        double ex = handle.getX(), ey = handle.getY() + handle.getEyeHeight(), ez = handle.getZ();
+        double dx = sc.x + 0.5 - ex, dy = sc.y + 0.5 - ey, dz = sc.z + 0.5 - ez;
+        double distSq = dx * dx + dy * dy + dz * dz;
+
+        if (distSq <= REACH_SQ
+                && ScaffoldPlanner.clearSight(new LiveTerrain(), ex, ey, ez, sc.x, sc.y, sc.z)) {
+            lookAtBlock(handle, sc.x, sc.y, sc.z);
+            mineScaffold(botPlayer, handle, block, sc);
+            return true;
+        }
+
+        if (distSq > 8.0 * 8.0 || !handle.onGround() && teardownTicks > 40) {
+            // Wandered off (or got knocked away): don't trek back across the
+            // map for one block.
+            giveBack(botPlayer, sc.material);
+            job.removeScaffoldNow(sc);
+            teardownTarget = null;
+            return true;
+        }
+
+        // Walk back to the spot we placed it from.
+        setSneak(job.isScaffoldCell(fx, fy - 1, fz));
+        double d = steerTo(handle, sc.standX + 0.5, sc.standZ + 0.5, sneaking ? 0.45f : 0.7f);
+        if (sc.standY > fy && handle.onGround() && d < 1.4) context.movementController.requestJump();
+        return true;
+    }
+
+    private void mineScaffold(Player botPlayer, ServerPlayer handle, Block block, BuildJob.Scaffold sc) {
+        int r = breakStep(botPlayer, handle, block);
+        if (r == BREAK_DONE) {
+            giveBack(botPlayer, sc.material);
+            job.removeScaffold(sc);
+            teardownTarget = null;
+        } else if (r == BREAK_CANCELLED) {
+            // A protection plugin said no - pop it directly instead so the
+            // scaffold still doesn't stay.
+            job.removeScaffoldNow(sc);
+            teardownTarget = null;
+        }
+    }
+
+    private boolean standingOn(ServerPlayer handle, BuildJob.Scaffold sc) {
+        if (!handle.onGround()) return false;
+        if (Math.abs(handle.getY() - (sc.y + 1.0)) > 0.1) return false;
+        final double half = 0.3;
+        return handle.getX() + half > sc.x && handle.getX() - half < sc.x + 1.0
+                && handle.getZ() + half > sc.z && handle.getZ() - half < sc.z + 1.0;
+    }
+
+    // Removing the block under us is fine if we'd land at most 3 blocks
+    // lower on something that isn't lava/fire/etc.
+    private boolean safeToDigDown(BuildJob.Scaffold sc) {
+        for (int d = 1; d <= 4; d++) {
+            Material m = job.world.getBlockAt(sc.x, sc.y - d, sc.z).getType();
+            if (m.isSolid()) return d <= 4 && !DANGER.contains(m);
+            if (m == Material.LAVA || m == Material.FIRE || m == Material.SOUL_FIRE) return false;
+            if (m == Material.WATER) return true;
+        }
+        return false;
+    }
+
+    private void giveBack(Player botPlayer, Material m) {
+        java.util.Map<Integer, ItemStack> left = botPlayer.getInventory().addItem(new ItemStack(m));
+        if (left.isEmpty()) context.packetBroadcaster.broadcastEquipment();
+    }
+
+    // =====================================================================
+    // Small movement helpers
+    // =====================================================================
+
+    // Walk toward (x, z) regardless of where we're looking; returns the
+    // horizontal distance left.
+    private double steerTo(ServerPlayer handle, double x, double z, float speed) {
+        double dx = x - handle.getX(), dz = z - handle.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 0.12) {
+            context.forwardInput = 0f;
+            context.strafeInput = 0f;
+            return dist;
+        }
+        context.movementController.easeYawTo((float) Math.toDegrees(Math.atan2(-dx, dz)));
+        float mag = (float) Math.min(speed, Math.max(0.15, dist));
+        context.movementController.worldDirToInputs(handle, dx / dist, dz / dist, mag);
+        context.suppressSprint = true;
+        return dist;
+    }
+
+    private void lookAtBlock(ServerPlayer handle, int x, int y, int z) {
+        double dx = x + 0.5 - handle.getX();
+        double dy = y + 0.5 - (handle.getY() + handle.getEyeHeight());
+        double dz = z + 0.5 - handle.getZ();
+        context.movementController.easeYawTo((float) Math.toDegrees(Math.atan2(-dx, dz)));
+        context.movementController.easePitchTo(
+                (float) Math.toDegrees(-Math.atan2(dy, Math.sqrt(dx * dx + dz * dz))));
+    }
+
+    private void setSneak(boolean on) {
+        if (sneaking == on) return;
+        sneaking = on;
+        try {
+            ServerPlayer handle = context.bot.getHandle();
+            if (handle != null) {
+                handle.setShiftKeyDown(on);
+                context.packetBroadcaster.broadcastEntityData();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static final java.util.Set<Material> DANGER = java.util.EnumSet.of(
+            Material.LAVA, Material.FIRE, Material.SOUL_FIRE, Material.MAGMA_BLOCK,
+            Material.CACTUS, Material.CAMPFIRE, Material.SOUL_CAMPFIRE,
+            Material.SWEET_BERRY_BUSH, Material.POWDER_SNOW, Material.WITHER_ROSE,
+            Material.POINTED_DRIPSTONE);
+
+    // Live-world view for the planner, with a per-plan block cache so the
+    // search doesn't hammer world lookups.
+    private final class LiveTerrain implements ScaffoldPlanner.Terrain {
+        private final java.util.Map<Long, Material> cache = new java.util.HashMap<>();
+        private final int minH = job.world.getMinHeight();
+        private final int maxH = job.world.getMaxHeight();
+
+        private Material at(int x, int y, int z) {
+            if (y < minH || y >= maxH) return null;
+            long k = ((long) (x & 0x3FFFFFF) << 38) | ((long) (y & 0xFFF) << 26) | (z & 0x3FFFFFF);
+            Material m = cache.get(k);
+            if (m == null) {
+                m = job.world.getBlockAt(x, y, z).getType();
+                cache.put(k, m);
+            }
+            return m;
+        }
+
+        @Override
+        public boolean solid(int x, int y, int z) {
+            Material m = at(x, y, z);
+            return m != null && m.isSolid();
+        }
+
+        @Override
+        public boolean passable(int x, int y, int z) {
+            Material m = at(x, y, z);
+            return m != null && !m.isSolid() && !DANGER.contains(m) && m != Material.COBWEB;
+        }
+
+        @Override
+        public boolean placeable(int x, int y, int z) {
+            Material m = at(x, y, z);
+            return m != null && (m.isAir() || isReplaceable(m)) && !job.isBuildCell(x, y, z);
+        }
+
+        @Override
+        public boolean dangerous(int x, int y, int z) {
+            Material m = at(x, y, z);
+            return m != null && DANGER.contains(m);
+        }
+
+        @Override
+        public boolean pendingBuild(int x, int y, int z) {
+            if (!job.isBuildCell(x, y, z)) return false;
+            Material m = at(x, y, z);
+            return m != null && (m.isAir() || isReplaceable(m));
+        }
     }
 
     private Block findSupport(Block target) {

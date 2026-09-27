@@ -40,6 +40,44 @@ public class BuildJob {
 
     public static final Material SCAFFOLD = Material.COBBLESTONE;
 
+    // A temporary block a bot placed to reach part of the build (a pillar
+    // step or a bridge floor). Tracked here, not just in the bot, so the job
+    // can guarantee none are left behind even if the bot that placed them
+    // dies, is removed, or gets pulled into a fight and never comes back.
+    public static final class Scaffold {
+        public final int x, y, z;
+        public final Material material;
+        public final UUID owner;
+        public final boolean pillar;
+        // Where the bot stood when it placed this block: a spot within reach
+        // that doesn't depend on the block itself (for a bridge block, the
+        // cell it was placed from).
+        public final int standX, standY, standZ;
+        public boolean abandoned;
+
+        Scaffold(int x, int y, int z, Material material, UUID owner, boolean pillar,
+                 int standX, int standY, int standZ) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.material = material;
+            this.owner = owner;
+            this.pillar = pillar;
+            this.standX = standX;
+            this.standY = standY;
+            this.standZ = standZ;
+        }
+    }
+
+    private final List<Scaffold> scaffold = new ArrayList<>();
+    private final java.util.HashSet<Long> scaffoldCells = new java.util.HashSet<>();
+    private final Map<UUID, Integer> heartbeat = new HashMap<>();
+    private int jobTicks = 0;
+
+    // Owner considered gone (dead, removed, reassigned) after this long
+    // without checking in; its scaffold then gets cleaned up by the job.
+    private static final int OWNER_TIMEOUT_TICKS = 200;
+
     private static final int STALL_TICKS = 100;
 
     private static final int LEASE_TICKS = 400;
@@ -137,7 +175,104 @@ public class BuildJob {
         return cancelled;
     }
 
+    // ---------------------------------------------------------------------
+    // Scaffold registry
+    // ---------------------------------------------------------------------
+
+    public void heartbeat(UUID bot) {
+        heartbeat.put(bot, jobTicks);
+    }
+
+    public Scaffold addScaffold(int x, int y, int z, Material m, UUID owner, boolean pillar,
+                                int standX, int standY, int standZ) {
+        Scaffold sc = new Scaffold(x, y, z, m, owner, pillar, standX, standY, standZ);
+        scaffold.add(sc);
+        scaffoldCells.add(key(x, y, z));
+        return sc;
+    }
+
+    public void removeScaffold(Scaffold sc) {
+        if (sc == null) return;
+        scaffold.remove(sc);
+        scaffoldCells.remove(key(sc.x, sc.y, sc.z));
+    }
+
+    public boolean isScaffoldCell(int x, int y, int z) {
+        return scaffoldCells.contains(key(x, y, z));
+    }
+
+    public boolean hasScaffold() {
+        return !scaffold.isEmpty();
+    }
+
+    public int scaffoldCount() {
+        return scaffold.size();
+    }
+
+    // This bot's scaffold, oldest first (tear down from the end).
+    public List<Scaffold> scaffoldOf(UUID owner) {
+        List<Scaffold> out = new ArrayList<>();
+        for (Scaffold sc : scaffold) {
+            if (sc.owner.equals(owner) && !sc.abandoned) out.add(sc);
+        }
+        return out;
+    }
+
+    // Pops a scaffold block straight back out of the world (no mining
+    // animation). The fallback that guarantees nothing is left behind.
+    public void removeScaffoldNow(Scaffold sc) {
+        if (sc == null) return;
+        org.bukkit.block.Block b = world.getBlockAt(sc.x, sc.y, sc.z);
+        if (b.getType() == sc.material) b.setType(Material.AIR, true);
+        removeScaffold(sc);
+    }
+
+    public void removeScaffoldNow(UUID owner) {
+        for (Scaffold sc : new ArrayList<>(scaffold)) {
+            if (owner == null || sc.owner.equals(owner)) removeScaffoldNow(sc);
+        }
+    }
+
+    private void cleanOrphanedScaffold() {
+        if (scaffold.isEmpty()) return;
+        for (Scaffold sc : new ArrayList<>(scaffold)) {
+            org.bukkit.block.Block b = world.getBlockAt(sc.x, sc.y, sc.z);
+            if (b.getType() != sc.material) {
+                // Already gone (mined, exploded, replaced) - just forget it.
+                removeScaffold(sc);
+                continue;
+            }
+            Integer seen = heartbeat.get(sc.owner);
+            boolean ownerGone = seen == null || jobTicks - seen > OWNER_TIMEOUT_TICKS;
+            boolean finishedAndIdle = isFinished() && ownerGone;
+            if ((sc.abandoned || ownerGone || finishedAndIdle) && !someoneStandsOn(sc)) {
+                removeScaffoldNow(sc);
+            }
+        }
+    }
+
+    private boolean someoneStandsOn(Scaffold sc) {
+        return someoneStandsOn(sc, -1);
+    }
+
+    // Any living entity (other than excludeEntityId) resting on top of it.
+    public boolean someoneStandsOn(Scaffold sc, int excludeEntityId) {
+        try {
+            org.bukkit.util.BoundingBox above = new org.bukkit.util.BoundingBox(
+                    sc.x - 0.3, sc.y + 1.0, sc.z - 0.3, sc.x + 1.3, sc.y + 3.0, sc.z + 1.3);
+            return !world.getNearbyEntities(above,
+                    e -> e instanceof org.bukkit.entity.LivingEntity
+                            && e.getEntityId() != excludeEntityId).isEmpty();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     public void tick() {
+        jobTicks++;
+        if ((jobTicks % 20) == 0) cleanOrphanedScaffold();
+        if (isFinished()) return;
+
         boolean openBelow = false;
         boolean readyBelow = false;
 

@@ -157,7 +157,9 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
                 if (!buildJobs.isEmpty()) {
                     buildJobs.values().removeIf(j -> {
                         j.tick();
-                        return j.isFinished();
+                        // Keep ticking a finished job until its scaffold is
+                        // torn down, so nothing temporary is left standing.
+                        return j.isFinished() && !j.hasScaffold();
                     });
                 }
 
