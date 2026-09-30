@@ -30,7 +30,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Formation | everyone go behind me · get behind me · fall in *(grid behind you, follows you until:)* break formation · at ease |
 | Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)* |
 | Destroy | everyone destroy the area · blow it up *(15×15; bots with TNT + flint & steel blast it, the rest use tools)* |
-| Stop work | everyone stop mining · stop digging |
+| Stop mining | everyone stop mining · stop digging · stop destroying |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
 
 Names don't have to be pronounceable: `NexarVo1d` works as "nexar void" (or

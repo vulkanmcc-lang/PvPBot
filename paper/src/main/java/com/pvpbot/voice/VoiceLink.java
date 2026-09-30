@@ -327,15 +327,20 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             }
             case WORK_STOP -> {
                 int stopped = 0;
+                boolean destroying = false;
                 for (PvPBot b : bots) {
                     var ec = b.getAI().getContext().excavationController;
                     if (ec.isActive()) {
+                        if (ec.job() != null && ec.job().mode == com.pvpbot.mine.ExcavationJob.Mode.DESTROY) {
+                            destroying = true;
+                        }
                         ec.abort();
                         stopped++;
                     }
                 }
                 com.pvpbot.mine.ExcavationJob.stop(speaker.getUniqueId());
-                ok(speaker, transcript, who + " → stopped working (" + stopped + ")");
+                ok(speaker, transcript, who + " → stopped " + (destroying ? "destroying" : "mining")
+                        + " (" + stopped + ")");
             }
         }
     }
