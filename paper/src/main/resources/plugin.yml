@@ -14,5 +14,5 @@ permissions:
     description: Access to all PvPBot commands
     default: op
   pvpbot.voice:
-    description: Give bots orders by voice with the PvPBot Voice Link client mod ("everyone kill Steve")
-    default: op
+    description: Give your faction's bots orders by voice with the PvPBot Voice Link client mod (only works for faction leaders; revoke to block someone)
+    default: true

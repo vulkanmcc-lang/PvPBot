@@ -30,14 +30,28 @@ public final class VoiceCommandParser {
         FOLLOW,     // stick with the speaker for a while
         WAIT,       // hold current position
         ADVANCE,    // move up the way the speaker is facing ("push forward")
-        ALERT       // "watch out", "they're coming" - get ready, hit nearby threats
+        ALERT,      // "watch out", "they're coming" - get ready, hit nearby threats
+        FORMATION,  // grid formation behind the speaker that follows them
+        BREAK_FORMATION,
+        MINE,       // excavate the area the speaker is looking at
+        DESTROY,    // level it - TNT if they carry it, tools otherwise
+        WORK_STOP   // stop mining / destroying
     }
 
     public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION }
 
-    // subjectFaction == null means "everyone the speaker commands".
-    public record Parsed(String subjectFaction, boolean addressed, Intent intent,
+    // subjectFaction == null and subjectBot == null means "everyone the
+    // speaker commands"; subjectBot is set for "<bot> come here".
+    public record Parsed(String subjectFaction, String subjectBot, boolean addressed, Intent intent,
                          TargetKind targetKind, String target, String heardTarget) {
+        Parsed(String subjectFaction, boolean addressed, Intent intent,
+               TargetKind targetKind, String target, String heardTarget) {
+            this(subjectFaction, null, addressed, intent, targetKind, target, heardTarget);
+        }
+
+        Parsed withBot(String bot) {
+            return new Parsed(subjectFaction, bot, addressed, intent, targetKind, target, heardTarget);
+        }
     }
 
     private static final Set<String> EVERYONE = Set.of(
@@ -72,6 +86,9 @@ public final class VoiceCommandParser {
     // general verbs they contain ("stop attacking" before "attack X", "get
     // ready" / "get over here" before "get X", "push them" before "push X").
     private static final List<Rule> RULES = List.of(
+            rule(Intent.WORK_STOP,
+                    "stop mining", "stop digging", "stop destroying", "stop blowing stuff up",
+                    "stop excavating", "stop working", "quit mining", "enough mining", "stop the mining"),
             rule(Intent.STAND_DOWN,
                     "stop attacking each other", "stop fighting each other", "stop fighting for a second",
                     "stop fighting", "stop attacking", "stop hitting", "dont hit your teammates",
@@ -82,6 +99,26 @@ public final class VoiceCommandParser {
                     "abort", "peace"),
             rule(Intent.ENGAGE,
                     "weapons free", "fight back", "free fire", "you can fight", "engage", "go wild"),
+            rule(Intent.DESTROY,
+                    "destroy the area", "destroy this area", "destroy that area", "destroy everything",
+                    "destroy it all", "destroy this", "destroy it", "blow up the area", "blow up this area",
+                    "blow it up", "blow everything up", "blow it all up", "demolish the area",
+                    "demolish this", "demolish it", "demolish", "level the area", "level this area",
+                    "flatten the area", "flatten this", "tear it down", "tear it all down", "raze the area",
+                    "wreck the area", "nuke it", "nuke the area"),
+            rule(Intent.MINE,
+                    "mine the area", "mine this area", "mine that area", "mine the place", "mine here",
+                    "mine this", "mine it out", "dig here", "dig this area", "dig the area", "dig this out",
+                    "dig it out", "dig out the area", "dig down", "excavate the area", "excavate this",
+                    "excavate here", "excavate", "start mining", "start digging", "go mine", "get mining",
+                    "get digging", "mine"),
+            rule(Intent.BREAK_FORMATION,
+                    "break formation", "break ranks", "at ease", "dismissed", "you are dismissed",
+                    "youre free", "you are free", "free roam", "do your own thing", "spread out"),
+            rule(Intent.FORMATION,
+                    "go behind me", "get behind me", "stay behind me", "fall in behind me", "line up behind me",
+                    "form up behind me", "get in formation", "form up", "fall in", "line up", "formation",
+                    "behind me"),
             rule(Intent.ALERT,
                     "keep your eyes open", "keep your eyes peeled", "eyes open", "watch out", "look out",
                     "behind you", "theyre coming", "they are coming", "here they come", "incoming",
@@ -117,8 +154,15 @@ public final class VoiceCommandParser {
 
     public static Parsed parse(String transcript, Collection<String> factions,
                                Collection<String> candidateNames) {
+        return parse(transcript, factions, candidateNames, List.of());
+    }
+
+    // botNames: bots the speaker may order individually ("Andy come here").
+    public static Parsed parse(String transcript, Collection<String> factions,
+                               Collection<String> candidateNames, Collection<String> botNames) {
         List<String> tokens = tokenize(transcript);
         if (tokens.isEmpty()) return null;
+        String subjectBot = null;
 
         // 1. Who's being addressed (optional). The address can sit anywhere
         // ("everyone come here", "calm down guys") and is cut out of the
@@ -163,6 +207,20 @@ public final class VoiceCommandParser {
                     && !startsAnyRule(tokens, start)) {
                 start++;
             }
+            // "<bot name> come here": up to three words of name, then a
+            // command straight after it.
+            if (botNames != null && !botNames.isEmpty() && !startsAnyRule(tokens, start)) {
+                for (int n = 1; n <= 3 && start + n < tokens.size(); n++) {
+                    if (!startsAnyRule(tokens, start + n)) continue;
+                    String bot = bestName(tokens.subList(start, start + n), botNames);
+                    if (bot != null) {
+                        subjectBot = bot;
+                        addressed = true;
+                        start += n;
+                        break;
+                    }
+                }
+            }
         }
 
         List<String> rest = tokens.subList(start, tokens.size());
@@ -174,7 +232,7 @@ public final class VoiceCommandParser {
                 Parsed p = t.slot
                         ? matchSlot(r.intent, t, rest, addressed, subjectFaction, factions, candidateNames)
                         : matchPlain(r.intent, t, rest, addressed, subjectFaction);
-                if (p != null) return p;
+                if (p != null) return subjectBot == null ? p : p.withBot(subjectBot);
             }
         }
         return null;
@@ -354,10 +412,10 @@ public final class VoiceCommandParser {
         for (String form : new ArrayList<>(out)) {
             String s = form.replaceAll("^x+|x+$", "");
             if (s.length() >= 3) out.add(s);
-            for (String prefix : List.of("its", "the", "im", "mr")) {
+            for (String prefix : List.of("its", "the", "im", "mr", "pvpbot", "bot")) {
                 if (s.startsWith(prefix) && s.length() - prefix.length() >= 3) out.add(s.substring(prefix.length()));
             }
-            for (String suffix : List.of("yt", "ttv", "tv", "mc", "pvp", "gaming", "official")) {
+            for (String suffix : List.of("yt", "ttv", "tv", "mc", "pvp", "gaming", "official", "bot")) {
                 if (s.endsWith(suffix) && s.length() - suffix.length() >= 3) {
                     out.add(s.substring(0, s.length() - suffix.length()));
                 }

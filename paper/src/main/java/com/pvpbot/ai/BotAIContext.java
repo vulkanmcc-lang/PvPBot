@@ -237,6 +237,23 @@ public class BotAIContext {
 
     public int smashThreatTicks = 0;
 
+    // Voice "stand down": no picking fights (or retaliating) until this runs
+    // out. Per bot, so it works with or without factions.
+    public int standDownTicks = 0;
+
+    // Drop every reason to fight right now and don't pick a new one for
+    // `ticks` (voice "stand down").
+    public void standDown(int ticks) {
+        standDownTicks = Math.max(standDownTicks, ticks);
+        forcedTarget = null;
+        target = null;
+        assistTarget = null;
+        lastDamager = null;
+        factionCombatTarget = null;
+        factionCombatTicks = 0;
+        critPhase = CritPhase.IDLE;
+    }
+
     public double smashEvadeX = 0.0;
     public double smashEvadeZ = 0.0;
     public int smashEvadeHold = 0;
@@ -553,6 +570,7 @@ public class BotAIContext {
     public DeliveryController deliveryController;
     public MiningController miningController;
     public AreaMiningController areaMiningController;
+    public ExcavationController excavationController;
     public TechniqueController techniqueController;
     public CartController cartController;
     public TunnelController tunnelController;
@@ -610,6 +628,7 @@ public class BotAIContext {
         if (buildController != null && buildController.isBusy()) return false;
         if (miningController != null && miningController.isActive()) return false;
         if (areaMiningController != null && areaMiningController.isActive()) return false;
+        if (excavationController != null && excavationController.isActive()) return false;
         if (farmController != null && farmController.isActive()) return false;
         if (deliveryController != null && deliveryController.isActive()) return false;
         if (patrolController != null && patrolController.isActive()) return false;
@@ -637,6 +656,7 @@ public class BotAIContext {
         this.deliveryController = new DeliveryController(this);
         this.miningController = new MiningController(this);
         this.areaMiningController = new AreaMiningController(this);
+        this.excavationController = new ExcavationController(this);
         this.techniqueController = new TechniqueController(this);
         this.cartController = new CartController(this);
         this.tunnelController = new TunnelController(this);

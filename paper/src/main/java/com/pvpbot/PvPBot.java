@@ -665,6 +665,7 @@ public class PvPBot {
                 ai.getContext().clutchController.abort(getBukkitPlayer());
 
                 ai.getContext().buildController.abort();
+                ai.getContext().excavationController.abort();
             }
         } catch (Throwable ignored) {
         }

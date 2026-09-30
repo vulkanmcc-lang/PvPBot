@@ -101,6 +101,7 @@ public class BotAI {
         if (context.fleeOpenYawTicks > 0) context.fleeOpenYawTicks--;
 
         if (context.smashThreatTicks > 0) context.smashThreatTicks--;
+        if (context.standDownTicks > 0) context.standDownTicks--;
 
         if (!context.bridging && context.bridgeCheckCooldown > 0) context.bridgeCheckCooldown--;
 
@@ -267,6 +268,13 @@ public class BotAI {
         com.pvpbot.perf.BotProfiler.end();
         if (hazardOwns) {
             context.inventoryController.manageOffhand(botPlayer);
+            finishTick(handle);
+            return;
+        }
+
+        boolean excavationOwns = context.excavationController.handleExcavation(botPlayer);
+        if (excavationOwns) {
+            context.navBranch = "EXCAVATE";
             finishTick(handle);
             return;
         }
@@ -610,6 +618,7 @@ public class BotAI {
         if (context.avoidTicks > 0) context.avoidTicks--;
         if (context.doorCooldown > 0) context.doorCooldown--;
         if (context.smashThreatTicks > 0) context.smashThreatTicks--;
+        if (context.standDownTicks > 0) context.standDownTicks--;
         if (context.jumpCooldown > 0) context.jumpCooldown--;
         if (context.pearlCooldown > 0) context.pearlCooldown--;
         if (context.regroupTicks > 0) context.regroupTicks--;
