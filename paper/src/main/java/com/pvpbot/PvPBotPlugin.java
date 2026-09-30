@@ -87,6 +87,7 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
         schematicManager = new com.pvpbot.schem.SchematicManager(this);
         routeManager = new com.pvpbot.route.RouteManager(this);
         PvPBotVoiceChat.register(this);
+        com.pvpbot.voice.VoiceLink.register(this);
         kitManager = new KitManager(this);
         botPersistence = new BotPersistence(this);
         botPersistence.loadConfig(getConfig().getConfigurationSection("persistence"));

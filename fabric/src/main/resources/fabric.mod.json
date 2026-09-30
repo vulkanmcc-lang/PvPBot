@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "pvpbot_voicelink",
+  "version": "${version}",
+  "name": "PvPBot Voice Link",
+  "description": "Give PvPBot bots orders by talking in Simple Voice Chat (\"everyone kill Steve\"). Speech is recognised offline on your PC; only recognised bot orders are sent to the server.",
+  "authors": ["PvPBot"],
+  "license": "Apache-2.0",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.pvpbot.voicelink.VoiceLinkClient"],
+    "voicechat": ["com.pvpbot.voicelink.VoiceLinkVoicechatPlugin"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "voicechat": "*"
+  }
+}
