@@ -623,15 +623,12 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         return best;
     }
 
+    // Feedback goes to the action bar only - voice orders shouldn't flood chat.
     private static void ok(Player speaker, String heard, String what) {
         speaker.sendActionBar(Component.text("🎙 " + what, NamedTextColor.GREEN));
-        speaker.sendMessage(Component.text("🎙 \"" + heard + "\" ", NamedTextColor.DARK_GRAY)
-                .append(Component.text(what, NamedTextColor.GRAY)));
     }
 
     private static void fail(Player speaker, String heard, String why) {
         speaker.sendActionBar(Component.text("🎙 " + why, NamedTextColor.RED));
-        speaker.sendMessage(Component.text("🎙 \"" + heard + "\" ", NamedTextColor.DARK_GRAY)
-                .append(Component.text(why, NamedTextColor.RED)));
     }
 }
