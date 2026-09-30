@@ -28,7 +28,7 @@ public final class VoiceLinkClient implements ClientModInitializer {
     // else you say on voice chat is recognised locally and thrown away.
     private static final Set<String> ADDRESS_WORDS = Set.of(
             "everyone", "everybody", "all", "bots", "team", "guys", "squad", "army",
-            "boys", "lads", "yall", "troops", "crew", "gang", "fellas");
+            "boys", "lads", "yall", "troops", "crew", "gang", "fellas", "every");
 
     // Words that can open an unaddressed order ("focus Steve", "follow me").
     // The server sends its full list on join; this is the fallback.
@@ -38,7 +38,8 @@ public final class VoiceLinkClient implements ClientModInitializer {
             "stay", "move", "lets", "keep", "go", "watch", "behind", "theyre", "wait", "we",
             "mine", "dig", "excavate", "destroy", "blow", "demolish", "level", "flatten", "break",
             "fall", "form", "line", "at", "dismissed", "quit", "pillar", "tower", "climb", "reach",
-            "bow", "bows", "shoot", "snipe", "fire", "use");
+            "bow", "bows", "shoot", "snipe", "fire", "use", "put", "take", "remove", "equip", "wear",
+            "armor", "armour", "gear", "suit", "strip", "every");
 
     private static final Set<String> LEAD_IN = Set.of(
             "ok", "okay", "hey", "yo", "alright", "right", "so", "and", "uh", "um", "now", "oi");

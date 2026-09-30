@@ -129,6 +129,21 @@ public class BotManager {
         return count;
     }
 
+    // Single-bot versions (voice: "Andy put your armor on").
+    public boolean equipArmorDelayed(PvPBot bot) {
+        if (bot == null || !bot.isAlive() || bot.getBukkitPlayer() == null) return false;
+        if (!armorTaskInProgress.add(bot.getUUID())) return false;
+        scheduleArmorEquip(bot);
+        return true;
+    }
+
+    public boolean removeArmorDelayed(PvPBot bot) {
+        if (bot == null || !bot.isAlive() || bot.getBukkitPlayer() == null) return false;
+        if (!armorTaskInProgress.add(bot.getUUID())) return false;
+        scheduleArmorRemove(bot);
+        return true;
+    }
+
     private void scheduleArmorEquip(PvPBot bot) {
         org.bukkit.entity.Player player = bot.getBukkitPlayer();
         if (player == null) {

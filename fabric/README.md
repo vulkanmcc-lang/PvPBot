@@ -33,6 +33,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Stop mining | everyone stop mining · stop digging · stop destroying |
 | Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight)* |
 | Bow | everyone bow *name* · shoot *name* · use your bows on *name* *(bots with a bow + arrows keep range and shoot; the rest go melee)* |
+| Armor | everyone put your armor on · gear up · everyone take your armor off |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
 
 Names don't have to be pronounceable: `NexarVo1d` works as "nexar void" (or
@@ -41,7 +42,8 @@ just "nexar"), `Steve123` as "steve", `xDarkKnightx` as "dark knight",
 server fuzzy-matches what you said against the players and bots online.
 
 Start with "everyone" / "guys" / a faction name, or open the sentence with
-the command. Single words like "stop" or "wait" need an address
+the command. If you address the bots and nothing happens, the action bar
+shows what the speech recogniser heard, so you can see which word it got wrong. Single words like "stop" or "wait" need an address
 ("everyone stop") so normal talk doesn't trigger them.
 
 ## Privacy

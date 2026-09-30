@@ -191,7 +191,17 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         for (PvPBot b : led) ledNames.add(ChatColor.stripColor(b.getName()));
         Parsed order = VoiceCommandParser.parse(transcript, manager.getFactionNames(),
                 candidateNames(manager, speaker), ledNames);
-        if (order == null) return; // ordinary chatter
+        if (order == null) {
+            // Talking to the bots but no order we know: show what was heard
+            // so a misrecognised word is easy to spot. Plain chatter stays
+            // silent.
+            if (VoiceCommandParser.mentionsBots(transcript, manager.getFactionNames(), ledNames)) {
+                lastCommand.put(speaker.getUniqueId(), now);
+                speaker.sendActionBar(Component.text("🎙 didn't catch an order in: \"" + transcript + "\"",
+                        NamedTextColor.YELLOW));
+            }
+            return;
+        }
         lastCommand.put(speaker.getUniqueId(), now);
 
         List<PvPBot> bots = selectBots(manager, speaker, led, order);
@@ -203,11 +213,18 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             return;
         }
         Set<String> factions = factionsOf(manager, bots);
-        // Any new order replaces a climb-to or bow order in progress.
+        // Any new order replaces a climb-to or bow order in progress; an
+        // order to go somewhere or work also ends a patrol, which would
+        // otherwise keep the bot on its route.
+        boolean relocates = switch (order.intent()) {
+            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, FORMATION, PILLAR_TO, BOW -> true;
+            default -> false;
+        };
         for (PvPBot b : bots) {
             var ctx = b.getAI().getContext();
             ctx.reachController.stop();
             ctx.archerController.stop();
+            if (relocates && ctx.patrolController.isActive()) ctx.patrolController.stop();
         }
         boolean movement = switch (order.intent()) {
             case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, FORMATION, BREAK_FORMATION -> true;
@@ -331,6 +348,20 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     }
                     ok(speaker, transcript, who + " → shooting " + vName + " (" + archers + " with bows"
                             + (melee > 0 ? ", " + melee + " without - melee" : "") + ")");
+                }
+            }
+            case ARMOR_ON, ARMOR_OFF -> {
+                boolean on = order.intent() == Intent.ARMOR_ON;
+                int n = 0;
+                for (PvPBot b : bots) {
+                    if (on ? manager.equipArmorDelayed(b) : manager.removeArmorDelayed(b)) n++;
+                }
+                if (n == 0) {
+                    fail(speaker, transcript, on ? "no armor to put on (or already doing it)"
+                            : "nothing to take off (or already doing it)");
+                } else {
+                    ok(speaker, transcript, who + " → " + (on ? "putting their armor on" : "taking their armor off")
+                            + " (" + n + ")");
                 }
             }
             case FORMATION -> {

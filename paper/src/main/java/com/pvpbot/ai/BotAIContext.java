@@ -241,6 +241,11 @@ public class BotAIContext {
     // out. Per bot, so it works with or without factions.
     public int standDownTicks = 0;
 
+    // Jumps refused because a block sits right above the head (a jump there
+    // only bonks - it can't climb a step). Enough of them in a row and the
+    // spot ahead is treated as a dead end.
+    public int ceilingBlockedJumps = 0;
+
     // Drop every reason to fight right now and don't pick a new one for
     // `ticks` (voice "stand down").
     public void standDown(int ticks) {

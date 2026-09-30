@@ -37,7 +37,9 @@ public final class VoiceCommandParser {
         DESTROY,    // level it - TNT if they carry it, tools otherwise
         WORK_STOP,  // stop mining / destroying
         PILLAR_TO,  // walk / bridge / pillar up to a player, then fight them
-        BOW         // shoot a player with bows from range
+        BOW,        // shoot a player with bows from range
+        ARMOR_ON,
+        ARMOR_OFF
     }
 
     public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION }
@@ -91,6 +93,14 @@ public final class VoiceCommandParser {
             rule(Intent.WORK_STOP,
                     "stop mining", "stop digging", "stop destroying", "stop blowing stuff up",
                     "stop excavating", "stop working", "quit mining", "enough mining", "stop the mining"),
+            rule(Intent.ARMOR_OFF,
+                    "take your armor off", "take off your armor", "take the armor off", "take armor off",
+                    "take off armor", "remove your armor", "remove armor", "unequip your armor",
+                    "armor off", "strip down", "strip"),
+            rule(Intent.ARMOR_ON,
+                    "put your armor on", "put on your armor", "put the armor on", "put armor on",
+                    "put on armor", "equip your armor", "equip armor", "wear your armor", "armor on",
+                    "armor up", "gear up", "suit up"),
             rule(Intent.STAND_DOWN,
                     "stop attacking each other", "stop fighting each other", "stop fighting for a second",
                     "stop fighting", "stop attacking", "stop hitting", "dont hit your teammates",
@@ -103,13 +113,14 @@ public final class VoiceCommandParser {
                     "weapons free", "fight back", "free fire", "you can fight", "engage", "go wild"),
             rule(Intent.DESTROY,
                     "destroy the area", "destroy this area", "destroy that area", "destroy everything",
-                    "destroy it all", "destroy this", "destroy it", "blow up the area", "blow up this area",
+                    "destroy it all", "destroy this", "destroy it", "destroy area", "destroy here",
+                    "blow up the area", "blow up this area",
                     "blow it up", "blow everything up", "blow it all up", "demolish the area",
                     "demolish this", "demolish it", "demolish", "level the area", "level this area",
                     "flatten the area", "flatten this", "tear it down", "tear it all down", "raze the area",
                     "wreck the area", "nuke it", "nuke the area"),
             rule(Intent.MINE,
-                    "mine the area", "mine this area", "mine that area", "mine the place", "mine here",
+                    "mine the area", "mine this area", "mine that area", "mine the place", "mine area", "mine here",
                     "mine this", "mine it out", "dig here", "dig this area", "dig the area", "dig this out",
                     "dig it out", "dig out the area", "dig down", "excavate the area", "excavate this",
                     "excavate here", "excavate", "start mining", "start digging", "go mine", "get mining",
@@ -611,8 +622,13 @@ public final class VoiceCommandParser {
         if (cleaned.isEmpty()) return List.of();
         List<String> out = new ArrayList<>(Arrays.asList(cleaned.split("\\s+")));
         for (int i = 0; i + 1 < out.size(); i++) {
-            if (out.get(i).equals("you") && out.get(i + 1).equals("all")) {
+            String a = out.get(i), b = out.get(i + 1);
+            if (a.equals("you") && b.equals("all")) {
                 out.set(i, "yall");
+                out.remove(i + 1);
+            } else if (a.equals("every") && (b.equals("one") || b.equals("body") || b.equals("won"))) {
+                // Speech engines often split it: "every one kill steve".
+                out.set(i, b.equals("body") ? "everybody" : "everyone");
                 out.remove(i + 1);
             }
         }
@@ -624,11 +640,66 @@ public final class VoiceCommandParser {
         outer:
         for (int i = Math.max(0, from); i + phrase.size() <= tokens.size(); i++) {
             for (int j = 0; j < phrase.size(); j++) {
-                if (!tokens.get(i + j).equals(phrase.get(j))) continue outer;
+                if (!wordMatches(tokens.get(i + j), phrase.get(j))) continue outer;
             }
             return i;
         }
         return -1;
+    }
+
+    // Speech-to-text rarely gives the exact word: "destroyed the area",
+    // "mind the area", "attacking", "armour". Accept the same word stem, a
+    // known mishearing, or (for longer words) a close spelling.
+    private static final Map<String, String> MISHEARD = Map.ofEntries(
+            Map.entry("mind", "mine"), Map.entry("mined", "mine"), Map.entry("mines", "mine"),
+            Map.entry("mining", "mine"), Map.entry("myne", "mine"), Map.entry("mine's", "mine"),
+            Map.entry("destroyed", "destroy"), Map.entry("destroying", "destroy"),
+            Map.entry("destroys", "destroy"), Map.entry("distroy", "destroy"),
+            Map.entry("destory", "destroy"), Map.entry("aria", "area"), Map.entry("era", "area"),
+            Map.entry("areas", "area"), Map.entry("armour", "armor"), Map.entry("armor's", "armor"),
+            Map.entry("armors", "armor"), Map.entry("killed", "kill"), Map.entry("kills", "kill"),
+            Map.entry("attacked", "attack"), Map.entry("attacking", "attack"),
+            Map.entry("followed", "follow"), Map.entry("following", "follow"),
+            Map.entry("shooting", "shoot"), Map.entry("shot", "shoot"), Map.entry("bowl", "bow"),
+            Map.entry("bo", "bow"), Map.entry("pillars", "pillar"), Map.entry("pillared", "pillar"),
+            Map.entry("pillow", "pillar"), Map.entry("pillar's", "pillar"), Map.entry("dug", "dig"),
+            Map.entry("digging", "dig"), Map.entry("stopped", "stop"), Map.entry("stops", "stop"),
+            Map.entry("focused", "focus"), Map.entry("targeted", "target"), Map.entry("targets", "target"),
+            Map.entry("comes", "come"), Map.entry("came", "come"), Map.entry("hear", "here"));
+
+    static boolean wordMatches(String heard, String want) {
+        if (heard.equals(want)) return true;
+        String h = MISHEARD.getOrDefault(heard, heard);
+        if (h.equals(want)) return true;
+        if (stem(h).equals(stem(want)) && stem(want).length() >= 3) return true;
+        return want.length() >= 5 && h.length() >= 4 && similarity(h, want) >= 0.8;
+    }
+
+    private static String stem(String w) {
+        if (w.length() > 5 && w.endsWith("ing")) return w.substring(0, w.length() - 3);
+        if (w.length() > 4 && w.endsWith("ed")) return w.substring(0, w.length() - 2);
+        if (w.length() > 4 && w.endsWith("es")) return w.substring(0, w.length() - 2);
+        if (w.length() > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.substring(0, w.length() - 1);
+        return w;
+    }
+
+    // Does the sentence talk to the bots at all ("everyone ...", a faction,
+    // one of the speaker's bots)? Used to tell the speaker when an order was
+    // addressed but couldn't be understood.
+    public static boolean mentionsBots(String transcript, Collection<String> factions, Collection<String> botNames) {
+        List<String> tokens = tokenize(transcript);
+        for (int i = 0; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if (EVERYONE.contains(t) && !t.equals("all") && !t.equals("team")) return true;
+            if (matchFaction(tokens, i, factions) != null) return true;
+        }
+        if (botNames != null && !botNames.isEmpty() && !tokens.isEmpty()) {
+            List<String> lead = tokens.subList(0, Math.min(3, tokens.size()));
+            for (int n = 1; n <= lead.size(); n++) {
+                if (bestName(lead.subList(0, n), botNames) != null) return true;
+            }
+        }
+        return false;
     }
 
     private static String matchFaction(List<String> tokens, int i, Collection<String> factions) {

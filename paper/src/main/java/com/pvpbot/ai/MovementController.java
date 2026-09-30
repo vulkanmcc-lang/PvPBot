@@ -132,6 +132,28 @@ public class MovementController {
         if (handle == null || !handle.onGround() || context.jumpCooldown > 0) return false;
         if (lethalDropInDirection(handle, dirX, dirZ, reach)) return false;
 
+        if (ceilingAboveHead(handle)) {
+            // Head-hitter: the jump can't lift us onto anything, so don't
+            // bounce in place forever (the classic stuck-under-an-overhang).
+            if (++context.ceilingBlockedJumps >= 12) {
+                context.ceilingBlockedJumps = 0;
+                Location here = botPlayerRef != null ? botPlayerRef.getLocation() : null;
+                if (here != null) {
+                    double yaw = Math.toRadians(handle.getYRot());
+                    context.markNavFailure((int) Math.floor(here.getX() - Math.sin(yaw)),
+                            here.getBlockY(), (int) Math.floor(here.getZ() + Math.cos(yaw)));
+                }
+                context.currentPath.clear();
+                context.pathNodeIndex = 0;
+                context.pathRecalcCooldown = 0;
+                context.avoidDir = ThreadLocalRandom.current().nextBoolean() ? 1 : -1;
+                context.avoidTicks = 10;
+            }
+            context.jumpCooldown = 4;
+            return false;
+        }
+        context.ceilingBlockedJumps = 0;
+
         context.jumpCooldown = 9 + java.util.concurrent.ThreadLocalRandom.current().nextInt(3);
         context.shouldJumpThisTick = true;
         return true;
@@ -571,6 +593,26 @@ public class MovementController {
         return (top < 0.0 || Double.isInfinite(top)) ? 0.0 : top;
     }
 
+    // Is there a full block directly above the head that a jump would hit
+    // straight away (anywhere across the 0.6-wide hitbox)?
+    private boolean ceilingAboveHead(ServerPlayer handle) {
+        org.bukkit.World w = handle.getBukkitEntity().getWorld();
+        double headTop = handle.getY() + 1.8;
+        int ceilY = (int) Math.floor(headTop + 0.3);
+        if (ceilY <= (int) Math.floor(headTop - 1.0e-6)) return false;
+        double x = handle.getX(), z = handle.getZ();
+        for (double ox : new double[]{-0.29, 0.29}) {
+            for (double oz : new double[]{-0.29, 0.29}) {
+                Block b = w.getBlockAt((int) Math.floor(x + ox), ceilY, (int) Math.floor(z + oz));
+                Material m = b.getType();
+                if (m.isSolid() && !m.name().endsWith("_CARPET") && !m.name().endsWith("_PRESSURE_PLATE")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public boolean requestJump() {
         Player botPlayerRef = context.bot.getBukkitPlayer();
         if (botPlayerRef != null && isBotStuckInCobweb(botPlayerRef)) return false;
@@ -589,6 +631,28 @@ public class MovementController {
             }
             return false;
         }
+
+        if (ceilingAboveHead(handle)) {
+            // Head-hitter: the jump can't lift us onto anything, so don't
+            // bounce in place forever (the classic stuck-under-an-overhang).
+            if (++context.ceilingBlockedJumps >= 12) {
+                context.ceilingBlockedJumps = 0;
+                Location here = botPlayerRef != null ? botPlayerRef.getLocation() : null;
+                if (here != null) {
+                    double yaw = Math.toRadians(handle.getYRot());
+                    context.markNavFailure((int) Math.floor(here.getX() - Math.sin(yaw)),
+                            here.getBlockY(), (int) Math.floor(here.getZ() + Math.cos(yaw)));
+                }
+                context.currentPath.clear();
+                context.pathNodeIndex = 0;
+                context.pathRecalcCooldown = 0;
+                context.avoidDir = ThreadLocalRandom.current().nextBoolean() ? 1 : -1;
+                context.avoidTicks = 10;
+            }
+            context.jumpCooldown = 4;
+            return false;
+        }
+        context.ceilingBlockedJumps = 0;
 
         context.jumpCooldown = 9 + java.util.concurrent.ThreadLocalRandom.current().nextInt(3);
         context.shouldJumpThisTick = true;
