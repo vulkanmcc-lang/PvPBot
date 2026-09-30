@@ -132,27 +132,7 @@ public class MovementController {
         if (handle == null || !handle.onGround() || context.jumpCooldown > 0) return false;
         if (lethalDropInDirection(handle, dirX, dirZ, reach)) return false;
 
-        if (ceilingAboveHead(handle)) {
-            // Head-hitter: the jump can't lift us onto anything, so don't
-            // bounce in place forever (the classic stuck-under-an-overhang).
-            if (++context.ceilingBlockedJumps >= 12) {
-                context.ceilingBlockedJumps = 0;
-                Location here = botPlayerRef != null ? botPlayerRef.getLocation() : null;
-                if (here != null) {
-                    double yaw = Math.toRadians(handle.getYRot());
-                    context.markNavFailure((int) Math.floor(here.getX() - Math.sin(yaw)),
-                            here.getBlockY(), (int) Math.floor(here.getZ() + Math.cos(yaw)));
-                }
-                context.currentPath.clear();
-                context.pathNodeIndex = 0;
-                context.pathRecalcCooldown = 0;
-                context.avoidDir = ThreadLocalRandom.current().nextBoolean() ? 1 : -1;
-                context.avoidTicks = 10;
-            }
-            context.jumpCooldown = 4;
-            return false;
-        }
-        context.ceilingBlockedJumps = 0;
+        if (ceilingAboveHead(handle)) return false;
 
         context.jumpCooldown = 9 + java.util.concurrent.ThreadLocalRandom.current().nextInt(3);
         context.shouldJumpThisTick = true;
