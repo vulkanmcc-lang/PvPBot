@@ -122,6 +122,8 @@ public class ExcavationController {
         toolCache.clear();
         spotCell = null;
         spot = null;
+        followCheck = 0;
+        replans = 0;
         // A leftover "walk to this spot" order (come here / regroup) would
         // otherwise take priority over the work every tick.
         context.movementController.clearFormationOrder();
@@ -150,6 +152,91 @@ public class ExcavationController {
         context.waterSinkTicks = 0;
     }
 
+    // A target only pulls a bot off its dig when fighting it is actually
+    // possible right now: it's in sight and close, or it's hitting us.
+    // An enemy under 10 blocks of stone is not a reason to stand there
+    // jumping at the floor - keep digging (possibly toward them).
+    private boolean canFightNow(Player botPlayer) {
+        Player t = context.target;
+        if (t == null || t.getWorld() != botPlayer.getWorld()) return false;
+        if (context.tickCounter - context.lastDamageTime < 40 && context.lastDamager == t) return true;
+        double d = t.getLocation().distance(botPlayer.getLocation());
+        if (d <= 3.5) return true;
+        return d <= 12.0 && context.combatController.hasLineOfSight(botPlayer, t);
+    }
+
+    // ---------------------------------------------------------------------
+    // Digging to a player (voice "mine down to X", or a bot's own chase dig
+    // toward an enemy it can't reach): follow them as they move.
+    // ---------------------------------------------------------------------
+
+    private static final int FOLLOW_CHECK_TICKS = 20;
+    private static final double ARRIVE_DISTANCE = 2.8;
+    private static final double REPLAN_DRIFT = 3.0;
+    private static final int MAX_REPLANS = 40;
+    private int followCheck;
+    private int replans;
+
+    // Start digging toward `target` on our own (combat: can't reach them).
+    public boolean startChase(Player botPlayer, Player target) {
+        if (target == null || target.getWorld() != botPlayer.getWorld()) return false;
+        java.util.List<java.util.UUID> crew = java.util.List.of(context.bot.getUUID());
+        ExcavationJob j = ExcavationJob.startDigTo(context.bot.getUUID(), crew,
+                java.util.List.of(botPlayer.getLocation()), target.getLocation(), target.getUniqueId());
+        if (j.total() == 0) {
+            j.cancel();
+            return false;
+        }
+        j.chase = true;
+        join(j);
+        return true;
+    }
+
+    public boolean isChasing() {
+        return job != null && job.chase;
+    }
+
+    // false = this bot is done with the job (arrived / target gone).
+    private boolean followDigTarget(Player botPlayer) {
+        if (job.digTarget == null) return true;
+        Player t = org.bukkit.Bukkit.getPlayer(job.digTarget);
+        if (t == null || !t.isOnline() || t.isDead() || t.getWorld() != botPlayer.getWorld()) {
+            abort();
+            return false;
+        }
+        // A chase dig belongs to one fight: target changed, chase over.
+        if (job.chase && context.target != null && context.target != t) {
+            abort();
+            return false;
+        }
+        Location me = botPlayer.getLocation();
+        if (me.distance(t.getLocation()) <= ARRIVE_DISTANCE
+                || (me.distance(t.getLocation()) <= 6.0 && context.combatController.hasLineOfSight(botPlayer, t))) {
+            // Through. An enemy gets fought from here; a friend just got
+            // company.
+            abort();
+            return false;
+        }
+        if (--followCheck > 0) return true;
+        followCheck = FOLLOW_CHECK_TICKS;
+        Location end = job.laneEnd(context.bot.getUUID());
+        boolean drifted = end == null || end.distance(t.getLocation()) > REPLAN_DRIFT;
+        boolean exhausted = job.laneLeft(context.bot.getUUID()) == 0;
+        if ((drifted || exhausted) && replans < MAX_REPLANS) {
+            if (cell != null) {
+                job.release(cell);
+                cell = null;
+            }
+            clearStage();
+            breaking = null;
+            spotCell = null;
+            claimCooldown = 0;
+            replans++;
+            job.replanLane(context.bot.getUUID(), me, t.getLocation());
+        }
+        return true;
+    }
+
     public static boolean hasTntKit(Player p) {
         PlayerInventory inv = p.getInventory();
         return inv.contains(Material.TNT) && inv.contains(Material.FLINT_AND_STEEL);
@@ -169,7 +256,7 @@ public class ExcavationController {
             return true;
         }
 
-        if (context.target != null || context.fleeing) {
+        if (context.fleeing || (context.target != null && canFightNow(botPlayer))) {
             // Fight first, keep the job; hand our claim back meanwhile.
             job.release(cell);
             cell = null;
@@ -181,6 +268,9 @@ public class ExcavationController {
         job.tick();
         if (job.isFinished()) {
             abort();
+            return false;
+        }
+        if (job.mode == ExcavationJob.Mode.DIG_TO && !followDigTarget(botPlayer)) {
             return false;
         }
         if (repathCooldown > 0) repathCooldown--;
@@ -552,7 +642,7 @@ public class ExcavationController {
     // waterlogged stair or the like)?
     private static boolean pluggable(Block b) {
         Material m = b.getType();
-        return m == Material.WATER || m == Material.BUBBLE_COLUMN || m == Material.KELP
+        return m == Material.WATER || m == Material.LAVA || m == Material.BUBBLE_COLUMN || m == Material.KELP
                 || m == Material.KELP_PLANT || m == Material.SEAGRASS || m == Material.TALL_SEAGRASS;
     }
 
@@ -570,7 +660,8 @@ public class ExcavationController {
         Block head = feet.getRelative(0, 1, 0);
         for (org.bukkit.block.BlockFace f : FLOOD_FACES) {
             Block n = block.getRelative(f);
-            if (!isWater(n)) continue;
+            boolean lava = n.getType() == Material.LAVA;
+            if (!lava && !isWater(n)) continue;
             // Already standing in that water: plugging it would bury us, and
             // we're wet anyway - the dive logic deals with that.
             if (n.equals(feet) || n.equals(head)) continue;

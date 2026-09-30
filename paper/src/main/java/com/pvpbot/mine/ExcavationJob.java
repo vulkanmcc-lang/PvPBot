@@ -95,7 +95,13 @@ public final class ExcavationJob {
     public final Mode mode;
     public final World world;
     public final UUID requester;
-    public final int minX, minY, minZ, maxX, maxY, maxZ;
+    // Bounds grow when a dig-to lane is re-planned toward a moving target.
+    public int minX, minY, minZ, maxX, maxY, maxZ;
+
+    // DIG_TO: who we're digging to (followed when they move), and whether
+    // this is a bot's own chase dig (combat) rather than an order.
+    public UUID digTarget;
+    public boolean chase;
 
     private final List<Cell> cells = new ArrayList<>();
     private final Map<Long, Cell> byPos = new HashMap<>();
@@ -294,6 +300,11 @@ public final class ExcavationJob {
 
     public static ExcavationJob startDigTo(UUID requester, List<UUID> crew, List<Location> starts,
                                            Location target) {
+        return startDigTo(requester, crew, starts, target, null);
+    }
+
+    public static ExcavationJob startDigTo(UUID requester, List<UUID> crew, List<Location> starts,
+                                           Location target, UUID targetId) {
         World w = target.getWorld();
         int tx = target.getBlockX(), ty = target.getBlockY(), tz = target.getBlockZ();
         List<Cell> made = new ArrayList<>();
@@ -302,24 +313,98 @@ public final class ExcavationJob {
             Location s = starts.get(lane);
             int[] col = freeColumn(s.getBlockX(), s.getBlockZ(), columns);
             columns.add(colKey(col[0], col[1]));
-            int x = col[0], z = col[1];
-            int top = s.getBlockY() - 1;             // the block we stand on goes first
-            int bottom = Math.max(ty, top - DIG_TO_MAX_DEPTH + 1);
-            int seq = 0;
-            // The shaft: our standing block down to the target's feet level.
-            for (int y = top; y >= bottom; y--) made.add(laneCell(x, y, z, lane, seq++));
-            // Across: a 1x2 walkway from the bottom of the shaft to the target.
-            int cx = x, cz = z;
-            int steps = 0;
-            while ((cx != tx || cz != tz) && steps++ < DIG_TO_MAX_ACROSS) {
-                int ddx = tx - cx, ddz = tz - cz;
-                if (Math.abs(ddx) >= Math.abs(ddz)) cx += Integer.signum(ddx);
-                else cz += Integer.signum(ddz);
-                made.add(laneCell(cx, bottom + 1, cz, lane, seq++));
-                made.add(laneCell(cx, bottom, cz, lane, seq++));
-            }
+            planDig(made, lane, 0, col[0], s.getBlockY(), col[1], tx, ty, tz);
         }
-        return laneJob(Mode.DIG_TO, requester, w, made, crew);
+        ExcavationJob job = laneJob(Mode.DIG_TO, requester, w, made, crew);
+        job.digTarget = targetId;
+        return job;
+    }
+
+    // Cells (in digging order) that take a bot standing with its feet at
+    // (x, y, z) to feet at (tx, ty, tz): a straight shaft for however much
+    // of the drop a staircase can't cover, then a walkable 1x2 staircase
+    // tunnel (one block of height per block across) the rest of the way.
+    // Returns the next free seq.
+    static int planDig(List<Cell> out, int lane, int seq, int x, int y, int z, int tx, int ty, int tz) {
+        int across = Math.abs(tx - x) + Math.abs(tz - z);
+        int drop = y - ty;
+        int shaft = Math.max(0, Math.min(DIG_TO_MAX_DEPTH, drop - across));
+        for (int i = 1; i <= shaft; i++) out.add(laneCell(x, y - i, z, lane, seq++));
+        y -= shaft;
+        int steps = 0;
+        while ((x != tx || z != tz) && steps++ < DIG_TO_MAX_ACROSS) {
+            int nx = x, nz = z;
+            int ddx = tx - x, ddz = tz - z;
+            if (Math.abs(ddx) >= Math.abs(ddz)) nx += Integer.signum(ddx);
+            else nz += Integer.signum(ddz);
+            int ny = y + Integer.signum(ty - y);
+            if (ny > y) {
+                // Stepping up: room to jump from here, then the step's air.
+                out.add(laneCell(x, y + 2, z, lane, seq++));
+                out.add(laneCell(nx, ny + 1, nz, lane, seq++));
+                out.add(laneCell(nx, ny, nz, lane, seq++));
+            } else if (ny < y) {
+                // Stepping down: our head height over there goes too.
+                out.add(laneCell(nx, ny + 2, nz, lane, seq++));
+                out.add(laneCell(nx, ny + 1, nz, lane, seq++));
+                out.add(laneCell(nx, ny, nz, lane, seq++));
+            } else {
+                out.add(laneCell(nx, ny + 1, nz, lane, seq++));
+                out.add(laneCell(nx, ny, nz, lane, seq++));
+            }
+            x = nx;
+            y = ny;
+            z = nz;
+        }
+        // Right over them but still above: straight down the last bit.
+        for (int i = 1; i <= Math.min(DIG_TO_MAX_DEPTH, y - ty); i++) out.add(laneCell(x, y - i, z, lane, seq++));
+        return seq;
+    }
+
+    // The target moved (or the plan ran out): drop what's left of this bot's
+    // lane and plan a fresh one from where it stands to where they are now.
+    public int replanLane(UUID bot, Location from, Location to) {
+        Integer lane = laneOf.get(bot);
+        if (lane == null) return 0;
+        List<Cell> list = laneCells.computeIfAbsent(lane, k -> new ArrayList<>());
+        int seq = 0;
+        for (Cell c : list) {
+            if (!c.done) markDone(c);
+            seq = Math.max(seq, c.seq + 1);
+        }
+        List<Cell> fresh = new ArrayList<>();
+        planDig(fresh, lane, seq, from.getBlockX(), from.getBlockY(), from.getBlockZ(),
+                to.getBlockX(), to.getBlockY(), to.getBlockZ());
+        for (Cell c : fresh) {
+            if (c.y <= world.getMinHeight() || c.y >= world.getMaxHeight()) continue;
+            cells.add(c);
+            list.add(c);
+            byPos.put(key(c.x, c.y, c.z), c);
+            remaining++;
+            minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+            minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+            minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+        }
+        return fresh.size();
+    }
+
+    // Blocks still to dig in this bot's lane.
+    public int laneLeft(UUID bot) {
+        Integer lane = laneOf.get(bot);
+        List<Cell> list = lane == null ? null : laneCells.get(lane);
+        if (list == null) return 0;
+        int n = 0;
+        for (int i = laneCursor.getOrDefault(lane, 0); i < list.size(); i++) if (!list.get(i).done) n++;
+        return n;
+    }
+
+    // Where this bot's lane ends (its planned arrival point), or null.
+    public Location laneEnd(UUID bot) {
+        Integer lane = laneOf.get(bot);
+        List<Cell> list = lane == null ? null : laneCells.get(lane);
+        if (list == null || list.isEmpty()) return null;
+        Cell last = list.get(list.size() - 1);
+        return new Location(world, last.x + 0.5, last.y, last.z + 0.5);
     }
 
     private static int[] freeColumn(int x, int z, java.util.Set<Long> taken) {

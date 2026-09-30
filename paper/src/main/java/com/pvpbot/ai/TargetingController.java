@@ -474,6 +474,7 @@ public class TargetingController {
     public void notifyDamage(Player attacker) {
         if (!context.settings.isHostile() || isFactionAttackStopped() || context.isStandingDown()) return;
         if (attacker == null) return;
+        if (attacker == context.ignoredTarget) context.ignoredTarget = null;
         context.lastDamager = attacker;
         context.lastDamageTime = context.tickCounter;
         context.externallyNotifiedDamage = true;
@@ -613,6 +614,10 @@ public class TargetingController {
         if (!TargetFilter.isEngageable(p, context.bot.getBukkitPlayer())) return false;
 
         if (p == context.forcedTarget) return true;
+
+        // Couldn't reach them for a long while and couldn't dig to them:
+        // leave them be for now (unless they come at us).
+        if (p == context.ignoredTarget && context.tickCounter < context.ignoredUntil) return false;
 
         if (context.confusedTicks <= 0 && isFriendly(p)) return false;
 

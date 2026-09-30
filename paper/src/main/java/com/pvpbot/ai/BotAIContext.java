@@ -261,6 +261,14 @@ public class BotAIContext {
     // Keep sinking in water instead of swimming up (excavation dive).
     public int waterSinkTicks = 0;
 
+    // Stuck on a target we can't get to (under stone, behind walls): how
+    // long, the closest we got, and a target we've given up on for now.
+    public int unreachableTicks = 0;
+    public double unreachableBest = Double.MAX_VALUE;
+    public int chaseCooldown = 0;
+    public Player ignoredTarget = null;
+    public int ignoredUntil = 0;
+
     // Commander order: walk to the speaker, nod, then go for the target.
     public java.util.UUID commanderSpeaker = null;
     public Player commanderVictim = null;

@@ -29,7 +29,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Alert | watch out · behind you · they're coming · get ready |
 | Formation | everyone go behind me · get behind me · fall in *(grid behind you, follows you until:)* break formation · at ease |
 | Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)*. Several areas at once: *Andy mine the area* here, *red team mine the area* over there - each group keeps its own |
-| Mine down to | everyone mine down to *name* · dig down to me *(each bot digs its own shaft straight down to their level, then tunnels across to them)* |
+| Mine down to | everyone mine down to *name* · dig down to me · tunnel to *name* *(each bot digs its own way: straight down for the steep part, then a walkable staircase tunnel; if they move, the bots re-plan toward where they are now)* |
 | Destroy | everyone destroy the area · blow it up *(15×15; bots with TNT + flint & steel blast it, the rest use tools)* |
 | Stop mining | everyone stop mining · stop digging · stop destroying |
 | Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight; bots take different routes)* |
@@ -47,6 +47,10 @@ Every new order replaces the last one: bots drop whatever they were doing
 (digging, building, holding a spot, following, a climb, a bow duel) and do the
 new thing. Armor, "look at me" and "weapons free" are the exceptions - they
 don't interrupt anything.
+
+A bot fighting someone it can't reach (under stone, behind walls) digs its
+way to them if they're level or below; if it can't, it drops them for a
+while and goes back to its orders instead of standing there jumping.
 
 Bots that end up stuck in a hole (a pit, a shaft, a dug-out area) while you
 or the spot they were sent to is up above walk to the wall, pillar up beside

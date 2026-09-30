@@ -596,7 +596,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     if (bp == null || b.getUUID().equals(victim.getUniqueId())) continue;
                     if (bp.getWorld() != vLoc.getWorld()) continue;
                     int drop = bp.getLocation().getBlockY() - vLoc.getBlockY();
-                    if (drop < 2) continue; // not above them - nothing to dig down through
+                    if (drop < -1) continue; // they're above - digging won't get there
                     if (Math.hypot(bp.getLocation().getX() - vLoc.getX(), bp.getLocation().getZ() - vLoc.getZ())
                             > com.pvpbot.mine.ExcavationJob.DIG_TO_MAX_ACROSS) continue;
                     crew.add(b.getUUID());
@@ -605,19 +605,20 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     deepest = Math.max(deepest, drop);
                 }
                 if (diggers.isEmpty()) {
-                    fail(speaker, transcript, vName + " isn't below them (or is too far away)");
+                    fail(speaker, transcript, vName + " is above them (or too far away) - try pillar to");
                     return;
                 }
                 com.pvpbot.mine.ExcavationJob job = com.pvpbot.mine.ExcavationJob.startDigTo(
-                        speaker.getUniqueId(), crew, starts, vLoc);
+                        speaker.getUniqueId(), crew, starts, vLoc, victim.getUniqueId());
                 if (job.total() == 0) {
                     job.cancel();
                     fail(speaker, transcript, "nothing to dig through to " + vName);
                     return;
                 }
                 for (PvPBot b : diggers) b.getAI().getContext().excavationController.join(job);
-                ok(speaker, transcript, who + " → mining down to " + vName + " (" + diggers.size()
-                        + " shaft" + (diggers.size() == 1 ? "" : "s") + ", " + deepest + " deep)");
+                ok(speaker, transcript, who + " → digging to " + vName + " (" + diggers.size()
+                        + " bot" + (diggers.size() == 1 ? "" : "s")
+                        + (deepest > 0 ? ", " + deepest + " down" : "") + " - they follow if " + vName + " moves)");
             }
             case SCATTER -> {
                 int n = scatter(speaker, bots);

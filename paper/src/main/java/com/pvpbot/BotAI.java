@@ -242,6 +242,8 @@ public class BotAI {
         if (context.pearlCooldown > 0) context.pearlCooldown--;
         if (context.regroupTicks > 0) context.regroupTicks--;
 
+        trackUnreachableTarget(botPlayer);
+
         if (context.climbOutController.handle(botPlayer)) {
             context.inventoryController.manageOffhand(botPlayer);
             finishTick(handle);
@@ -776,6 +778,57 @@ public class BotAI {
     private static final int TUNNEL_WALL_BUMP_TICKS = 20;
     private static final int TUNNEL_PATH_FAILURES = 2;
     private static final int TUNNEL_BLOCKED_TICKS = 15;
+
+    // A target we keep failing to get closer to (it's under stone, behind a
+    // wall, down a shaft): after a few seconds dig our way to it if it's
+    // level or below; if even that isn't possible, give up on it for a
+    // while instead of standing there jumping at the floor. Never touches a
+    // bot that's busy with an order (walk, hold, dig, build, climb, bow).
+    private static final int UNREACHABLE_DIG_TICKS = 60;
+    private static final int UNREACHABLE_DROP_TICKS = 200;
+    private static final int IGNORE_TICKS = 400;
+
+    private void trackUnreachableTarget(Player botPlayer) {
+        if (context.chaseCooldown > 0) context.chaseCooldown--;
+        Player t = context.target;
+        boolean busy = context.formationSlot != null || context.guardAnchor != null
+                || context.excavationController.isActive() || context.reachController.isActive()
+                || context.archerController.isActive() || context.buildController.isBusy()
+                || context.patrolController.isActive() || context.commanderController.isActive()
+                || context.climbOutController.isActive();
+        if (t == null || busy || context.fleeing || t.getWorld() != botPlayer.getWorld()) {
+            context.unreachableTicks = 0;
+            context.unreachableBest = Double.MAX_VALUE;
+            return;
+        }
+        if ((context.tickCounter % 5) != 0) return;
+        double d = botPlayer.getLocation().distance(t.getLocation());
+        if (d <= context.settings.getReach() + 1.5 || d < context.unreachableBest - 1.0) {
+            context.unreachableBest = Math.min(context.unreachableBest, d);
+            context.unreachableTicks = 0;
+            return;
+        }
+        context.unreachableTicks += 5;
+        if (context.unreachableTicks < UNREACHABLE_DIG_TICKS) return;
+
+        boolean sees = context.combatController.hasLineOfSight(botPlayer, t);
+        double rise = t.getLocation().getY() - botPlayer.getLocation().getY();
+        if (!sees && rise <= 2.5 && d <= 40.0 && context.chaseCooldown <= 0) {
+            context.chaseCooldown = 100;
+            if (context.excavationController.startChase(botPlayer, t)) {
+                context.unreachableTicks = 0;
+                context.unreachableBest = Double.MAX_VALUE;
+                return;
+            }
+        }
+        if (context.unreachableTicks >= UNREACHABLE_DROP_TICKS && t != context.forcedTarget) {
+            context.ignoredTarget = t;
+            context.ignoredUntil = context.tickCounter + IGNORE_TICKS;
+            context.target = null;
+            context.unreachableTicks = 0;
+            context.unreachableBest = Double.MAX_VALUE;
+        }
+    }
 
     private void maybeStartTunnel(Player botPlayer) {
         if (context.tunnelController.isActive()) return;
