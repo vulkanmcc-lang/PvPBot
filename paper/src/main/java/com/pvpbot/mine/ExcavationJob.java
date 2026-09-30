@@ -104,6 +104,12 @@ public final class ExcavationJob {
     public boolean chase;
 
     private final List<Cell> cells = new ArrayList<>();
+    // Area jobs: the box's cells alone, top-down (lane cells live in their
+    // lanes and in `cells`, never here).
+    private final List<Cell> areaCells = new ArrayList<>();
+    private boolean hasArea = false;
+    private int areaMinX, areaMinY, areaMinZ, areaMaxX, areaMaxY, areaMaxZ;
+    private int centerX, centerY, centerZ;
     private final Map<Long, Cell> byPos = new HashMap<>();
     private final List<BlastPoint> blasts = new ArrayList<>();
     private final long deadline;
@@ -114,7 +120,7 @@ public final class ExcavationJob {
     private final java.util.Set<Long> sealed = new java.util.HashSet<>();
 
     private int remaining = 0;     // cells not done
-    private int firstLive = 0;     // area jobs: index of the highest cell not done
+    private int firstLive = 0;     // area jobs: index of the highest area cell not done
     private int topY;
     private int lastTick = Integer.MIN_VALUE;
     private int broken = 0;
@@ -126,6 +132,21 @@ public final class ExcavationJob {
     private final Map<UUID, Integer> laneOf = new HashMap<>();
     private final Map<Integer, List<Cell>> laneCells = new HashMap<>();
     private final Map<Integer, Integer> laneCursor = new HashMap<>();
+    private int nextLane = 0;
+
+    // Mining jobs: bots that go off digging their own wandering tunnel out
+    // of the area (straight runs, 90 degree turns, staircases down and the
+    // odd step back up, following any ore they uncover).
+    private static final class Walker {
+        int x, y, z, dx, dz;
+        int extensions;
+    }
+
+    private final Map<Integer, Walker> walkers = new HashMap<>();
+    private final Map<Integer, Integer> oresAdded = new HashMap<>();
+    private static final int MAX_PROSPECTORS = 12;
+    private static final int MAX_EXTENSIONS = 4;
+    private static final int MAX_ORES_PER_LANE = 40;
 
     private ExcavationJob(Mode mode, World world, UUID requester, long durationMs,
                           int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
@@ -201,6 +222,9 @@ public final class ExcavationJob {
 
         ExcavationJob job = new ExcavationJob(mode, w, requester, durationMs,
                 cx - r, minY, cz - r, cx + r, maxY, cz + r);
+        job.centerX = cx;
+        job.centerY = cy;
+        job.centerZ = cz;
         job.scan(cx, cz);
         register(job);
         return job;
@@ -220,6 +244,10 @@ public final class ExcavationJob {
         }
         cells.sort(Comparator.comparingInt((Cell c) -> -c.y)
                 .thenComparingInt(c -> (c.x - cx) * (c.x - cx) + (c.z - cz) * (c.z - cz)));
+        areaCells.addAll(cells);
+        hasArea = true;
+        areaMinX = minX; areaMinY = minY; areaMinZ = minZ;
+        areaMaxX = maxX; areaMaxY = maxY; areaMaxZ = maxZ;
         remaining = cells.size();
         topY = cells.isEmpty() ? minY : cells.get(0).y;
 
@@ -338,26 +366,33 @@ public final class ExcavationJob {
             if (Math.abs(ddx) >= Math.abs(ddz)) nx += Integer.signum(ddx);
             else nz += Integer.signum(ddz);
             int ny = y + Integer.signum(ty - y);
-            if (ny > y) {
-                // Stepping up: room to jump from here, then the step's air.
-                out.add(laneCell(x, y + 2, z, lane, seq++));
-                out.add(laneCell(nx, ny + 1, nz, lane, seq++));
-                out.add(laneCell(nx, ny, nz, lane, seq++));
-            } else if (ny < y) {
-                // Stepping down: our head height over there goes too.
-                out.add(laneCell(nx, ny + 2, nz, lane, seq++));
-                out.add(laneCell(nx, ny + 1, nz, lane, seq++));
-                out.add(laneCell(nx, ny, nz, lane, seq++));
-            } else {
-                out.add(laneCell(nx, ny + 1, nz, lane, seq++));
-                out.add(laneCell(nx, ny, nz, lane, seq++));
-            }
+            seq = stepCells(out, lane, seq, x, y, z, nx, ny, nz);
             x = nx;
             y = ny;
             z = nz;
         }
         // Right over them but still above: straight down the last bit.
         for (int i = 1; i <= Math.min(DIG_TO_MAX_DEPTH, y - ty); i++) out.add(laneCell(x, y - i, z, lane, seq++));
+        return seq;
+    }
+
+    // The blocks to clear to walk one step from feet (x, y, z) to feet
+    // (nx, ny, nz) in a 1x2 tunnel (ny at most one up or down).
+    static int stepCells(List<Cell> out, int lane, int seq, int x, int y, int z, int nx, int ny, int nz) {
+        if (ny > y) {
+            // Stepping up: room to jump from here, then the step's air.
+            out.add(laneCell(x, y + 2, z, lane, seq++));
+            out.add(laneCell(nx, ny + 1, nz, lane, seq++));
+            out.add(laneCell(nx, ny, nz, lane, seq++));
+        } else if (ny < y) {
+            // Stepping down: our head height over there goes too.
+            out.add(laneCell(nx, ny + 2, nz, lane, seq++));
+            out.add(laneCell(nx, ny + 1, nz, lane, seq++));
+            out.add(laneCell(nx, ny, nz, lane, seq++));
+        } else {
+            out.add(laneCell(nx, ny + 1, nz, lane, seq++));
+            out.add(laneCell(nx, ny, nz, lane, seq++));
+        }
         return seq;
     }
 
@@ -464,6 +499,7 @@ public final class ExcavationJob {
         }
         for (List<Cell> lane : job.laneCells.values()) lane.sort(Comparator.comparingInt(c -> c.seq));
         for (int i = 0; i < crew.size(); i++) job.laneOf.put(crew.get(i), i);
+        job.nextLane = Math.max(crew.size(), job.laneCells.size());
         job.remaining = job.cells.size();
         job.topY = maxY;
         register(job);
@@ -482,6 +518,149 @@ public final class ExcavationJob {
     }
 
     private Cell claimInLane(UUID bot, java.util.function.Predicate<Block> canBreak) {
+        Cell c = claimInLaneOnce(bot, canBreak);
+        if (c != null) return c;
+        // A wandering tunnel that ran out keeps going a few more times.
+        Integer lane = laneOf.get(bot);
+        Walker w = lane == null ? null : walkers.get(lane);
+        if (w != null && w.extensions < MAX_EXTENSIONS && laneLeft(bot) == 0) {
+            extendWalker(lane, w, false);
+            return claimInLaneOnce(bot, canBreak);
+        }
+        return null;
+    }
+
+    public boolean hasLane(UUID bot) {
+        return laneOf.containsKey(bot);
+    }
+
+    public int prospectors() {
+        return walkers.size();
+    }
+
+    // Send this bot off on its own wandering tunnel, starting where it
+    // stands and heading away from the middle of the area.
+    public void addProspectorLane(UUID bot, Location from) {
+        int lane = nextLane++;
+        Walker w = new Walker();
+        w.x = from.getBlockX();
+        w.y = from.getBlockY();
+        w.z = from.getBlockZ();
+        int ddx = w.x - centerX, ddz = w.z - centerZ;
+        java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+        if (ddx == 0 && ddz == 0) {
+            int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            int[] d = dirs[rnd.nextInt(4)];
+            w.dx = d[0];
+            w.dz = d[1];
+        } else if (Math.abs(ddx) >= Math.abs(ddz)) {
+            w.dx = Integer.signum(ddx);
+        } else {
+            w.dz = Integer.signum(ddz);
+        }
+        walkers.put(lane, w);
+        laneCells.put(lane, new ArrayList<>());
+        laneOf.put(bot, lane);
+        extendWalker(lane, w, true);
+    }
+
+    private int floorY() {
+        return Math.max(world.getMinHeight() + 4, centerY - 24);
+    }
+
+    // Another 18-38 steps of wandering tunnel from where the walker is.
+    private void extendWalker(int lane, Walker w, boolean first) {
+        java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+        List<Cell> fresh = new ArrayList<>();
+        List<Cell> list = laneCells.get(lane);
+        int seq = list.isEmpty() ? 0 : list.get(list.size() - 1).seq + 1;
+        int x = w.x, y = w.y, z = w.z;
+        int floor = floorY(), ceil = centerY + 2;
+        int target = 18 + rnd.nextInt(21);
+        int steps = 0;
+        boolean forceDown = first && y - 3 >= floor;
+        while (steps < target) {
+            int vy = 0, len;
+            double r = rnd.nextDouble();
+            if (forceDown) {
+                vy = -1;
+                len = 3 + rnd.nextInt(3);
+                forceDown = false;
+            } else if (r < 0.42) {
+                len = 4 + rnd.nextInt(6);
+            } else if (r < 0.67) {
+                // 90 degree turn, left or right.
+                int odx = w.dx;
+                if (rnd.nextBoolean()) {
+                    w.dx = -w.dz;
+                    w.dz = odx;
+                } else {
+                    w.dx = w.dz;
+                    w.dz = -odx;
+                }
+                len = 3 + rnd.nextInt(4);
+            } else if (r < 0.87) {
+                vy = -1; // staircase down
+                len = 3 + rnd.nextInt(4);
+            } else {
+                vy = 1;  // a few steps back up
+                len = 2 + rnd.nextInt(3);
+            }
+            for (int k = 0; k < len && steps < target; k++) {
+                int ny = y + vy;
+                if (ny < floor || ny > ceil) ny = y;
+                seq = stepCells(fresh, lane, seq, x, y, z, x + w.dx, ny, z + w.dz);
+                x += w.dx;
+                z += w.dz;
+                y = ny;
+                steps++;
+            }
+        }
+        w.x = x;
+        w.y = y;
+        w.z = z;
+        w.extensions++;
+        for (Cell c : fresh) addLaneCell(list, list.size(), c);
+    }
+
+    private void addLaneCell(List<Cell> list, int index, Cell c) {
+        if (c.y <= world.getMinHeight() || c.y >= world.getMaxHeight()) return;
+        cells.add(c);
+        list.add(index, c);
+        byPos.putIfAbsent(key(c.x, c.y, c.z), c);
+        remaining++;
+        minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+        minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+        minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+    }
+
+    private static boolean isOre(Material m) {
+        return m.name().endsWith("_ORE") || m == Material.ANCIENT_DEBRIS;
+    }
+
+    // An ore next to a block just dug out of a tunnel: dig it next (and
+    // whatever ore is next to that - a whole vein, up to a limit).
+    private void followOres(Cell dug) {
+        if (dug.lane < 0 || (mode != Mode.MINE && mode != Mode.TUNNEL)) return;
+        List<Cell> list = laneCells.get(dug.lane);
+        if (list == null) return;
+        int added = oresAdded.getOrDefault(dug.lane, 0);
+        int cursor = laneCursor.getOrDefault(dug.lane, 0);
+        while (cursor < list.size() && list.get(cursor).done) cursor++;
+        int[][] around = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (int[] d : around) {
+            if (added >= MAX_ORES_PER_LANE) break;
+            int x = dug.x + d[0], y = dug.y + d[1], z = dug.z + d[2];
+            if (byPos.containsKey(key(x, y, z))) continue;
+            if (!isOre(world.getBlockAt(x, y, z).getType())) continue;
+            Cell ore = laneCell(x, y, z, dug.lane, dug.seq);
+            addLaneCell(list, Math.min(cursor, list.size()), ore);
+            added++;
+        }
+        oresAdded.put(dug.lane, added);
+    }
+
+    private Cell claimInLaneOnce(UUID bot, java.util.function.Predicate<Block> canBreak) {
         Integer lane = laneOf.get(bot);
         if (lane == null) {
             // Joined late: take a lane nobody works (or share the first).
@@ -571,10 +750,10 @@ public final class ExcavationJob {
             }
         }
 
-        if (!isLaneJob()) {
-            // Cells are sorted top-down: the top layer is the first live one.
-            while (firstLive < cells.size() && cells.get(firstLive).done) firstLive++;
-            topY = firstLive < cells.size() ? cells.get(firstLive).y : minY;
+        if (hasArea) {
+            // Area cells are sorted top-down: the top layer is the first live one.
+            while (firstLive < areaCells.size() && areaCells.get(firstLive).done) firstLive++;
+            topY = firstLive < areaCells.size() ? areaCells.get(firstLive).y : minY;
         }
 
         for (BlastPoint b : blasts) {
@@ -588,7 +767,7 @@ public final class ExcavationJob {
 
     public Cell claim(UUID bot, Player botPlayer, java.util.function.Predicate<Block> canBreak) {
         if (isFinished()) return null;
-        if (isLaneJob()) return claimInLane(bot, canBreak);
+        if (isLaneJob() || laneOf.containsKey(bot)) return claimInLane(bot, canBreak);
         Location at = botPlayer.getLocation();
         int now = Bukkit.getCurrentTick();
 
@@ -611,10 +790,11 @@ public final class ExcavationJob {
         // one awkward block.
         List<Candidate> cands = new ArrayList<>();
         int windowBottom = topY - 1;
-        int i = firstLive, n = cells.size();
+        int i = firstLive, n = areaCells.size();
+        boolean sawAny = false;
         while (true) {
             for (; i < n; i++) {
-                Cell c = cells.get(i);
+                Cell c = areaCells.get(i);
                 if (c.y < windowBottom) break; // sorted top-down
                 if (c.done || c.owner != null || c.retryAt > now) continue;
                 if (c.cannot != null && c.cannot.contains(bot)) continue;
@@ -622,14 +802,22 @@ public final class ExcavationJob {
                 cands.add(new Candidate(c, dx * dx + dy * dy * 2.0 + dz * dz));
             }
             if (!cands.isEmpty()) {
+                sawAny = true;
                 cands.sort(Comparator.comparingDouble(Candidate::d));
                 Cell got = checkCandidates(cands, bot, canBreak, people);
                 if (got != null) return got;
                 cands.clear();
             }
-            if (i >= n || topY - windowBottom >= MAX_LAYER_SKIP) return null;
+            if (i >= n || topY - windowBottom >= MAX_LAYER_SKIP) break;
             windowBottom -= 2;
         }
+        // Nothing in the area for this bot (done, or all taken): a mining
+        // crew doesn't stand around - branch off into a tunnel of its own.
+        if (mode == Mode.MINE && !sawAny && walkers.size() < MAX_PROSPECTORS) {
+            addProspectorLane(bot, at);
+            return claimInLane(bot, canBreak);
+        }
+        return null;
     }
 
     private static final int MAX_LAYER_SKIP = 12;
@@ -638,6 +826,7 @@ public final class ExcavationJob {
     private Cell checkCandidates(List<Candidate> cands, UUID bot, java.util.function.Predicate<Block> canBreak,
                                  List<Location> people) {
         int checks = 0;
+        List<Cell> valid = new ArrayList<>(3);
         for (Candidate cand : cands) {
             if (checks++ >= CLAIM_CHECKS) break;
             Cell c = cand.cell();
@@ -655,11 +844,18 @@ public final class ExcavationJob {
                 if (c.cannot.size() >= Math.max(1, crew.size())) markDone(c);
                 continue;
             }
-            c.owner = bot;
-            c.leaseTicks = LEASE_TICKS;
-            return c;
+            valid.add(c);
+            if (valid.size() >= 3) break;
         }
-        return null;
+        if (valid.isEmpty()) return null;
+        // Mostly the nearest, sometimes the 2nd/3rd: crews spread over the
+        // area and move around it instead of eating it in a fixed order.
+        double r = java.util.concurrent.ThreadLocalRandom.current().nextDouble();
+        int pick = r < 0.6 || valid.size() == 1 ? 0 : (r < 0.85 || valid.size() == 2 ? 1 : 2);
+        Cell c = valid.get(pick);
+        c.owner = bot;
+        c.leaseTicks = LEASE_TICKS;
+        return c;
     }
 
     private static boolean underSomeone(Cell c, List<Location> people) {
@@ -726,6 +922,7 @@ public final class ExcavationJob {
         if (c == null || c.done) return;
         markDone(c);
         broken++;
+        followOres(c);
     }
 
     // Something in the way got broken as part of reaching another block.
@@ -752,7 +949,7 @@ public final class ExcavationJob {
     public void unreachableFor(Cell c, UUID bot) {
         if (c == null || c.done) return;
         c.owner = null;
-        if (isLaneJob()) {
+        if (isLaneJob() || c.lane >= 0) {
             if (++c.failures >= MAX_CELL_FAILURES) markDone(c);
             return;
         }
@@ -783,6 +980,15 @@ public final class ExcavationJob {
 
     public boolean isCell(int x, int y, int z) {
         return byPos.containsKey(key(x, y, z));
+    }
+
+    // May a bot break this block for the job: one of its cells, or inside
+    // the area box (a blocker in the way of an area cell).
+    public boolean mayDig(int x, int y, int z) {
+        if (isSealed(x, y, z)) return false;
+        if (byPos.containsKey(key(x, y, z))) return true;
+        return hasArea && x >= areaMinX && x <= areaMaxX && y >= areaMinY && y <= areaMaxY
+                && z >= areaMinZ && z <= areaMaxZ;
     }
 
     public boolean contains(int x, int y, int z) {

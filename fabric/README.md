@@ -28,7 +28,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Stay | everyone stay here · stay put · hold your position · don't move *(each bot keeps its spot - fights anyone who comes close, walks back - until the next order)* |
 | Alert | watch out · behind you · they're coming · get ready |
 | Formation | everyone go behind me · get behind me · fall in *(grid behind you, follows you until:)* break formation · at ease |
-| Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)*. Several areas at once: *Andy mine the area* here, *red team mine the area* over there - each group keeps its own |
+| Mine | everyone mine the area · dig here *(the area you're looking at, dug top-down with pickaxes/shovels - bigger the more bots dig it; about a third of the crew wander off digging their own tunnels: straight runs, 90° turns, staircases down, following ore veins; the rest branch off too once the pit is done)*. Several areas at once: *Andy mine the area* here, *red team mine the area* over there - each group keeps its own |
 | Mine down to | everyone mine down to *name* · dig down to me · tunnel to *name* *(each bot digs its own way: straight down for the steep part, then a walkable staircase tunnel; if they move, the bots re-plan toward where they are now)* |
 | Destroy | everyone destroy the area · blow it up *(15×15; bots with TNT + flint & steel blast it, the rest use tools)* |
 | Stop mining | everyone stop mining · stop digging · stop destroying |

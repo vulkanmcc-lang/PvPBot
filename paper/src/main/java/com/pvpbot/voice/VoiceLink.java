@@ -539,19 +539,36 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             case MINE, DESTROY -> {
                 boolean destroy = order.intent() == Intent.DESTROY;
                 Location center = workCenter(speaker);
-                com.pvpbot.mine.ExcavationJob job = com.pvpbot.mine.ExcavationJob.start(
-                        destroy ? com.pvpbot.mine.ExcavationJob.Mode.DESTROY : com.pvpbot.mine.ExcavationJob.Mode.MINE,
-                        speaker.getUniqueId(), center);
+                // Mining: about a third of the crew (at least one when there
+                // are two or more) heads off on wandering tunnels of their
+                // own; the pit grows with the bots left to dig it.
+                List<PvPBot> explorers = new ArrayList<>();
+                if (!destroy && bots.size() >= 2) {
+                    List<PvPBot> shuffled = new ArrayList<>(bots);
+                    java.util.Collections.shuffle(shuffled);
+                    int k = Math.max(1, (int) Math.round(bots.size() * 0.35));
+                    explorers.addAll(shuffled.subList(0, Math.min(k, shuffled.size() - 1)));
+                }
+                int pitCrew = bots.size() - explorers.size();
+                com.pvpbot.mine.ExcavationJob job = destroy
+                        ? com.pvpbot.mine.ExcavationJob.start(com.pvpbot.mine.ExcavationJob.Mode.DESTROY,
+                        speaker.getUniqueId(), center)
+                        : com.pvpbot.mine.ExcavationJob.start(com.pvpbot.mine.ExcavationJob.Mode.MINE,
+                        speaker.getUniqueId(), center, Math.max(5, Math.min(9, 3 + pitCrew)), 2, 4,
+                        20L * 60L * 1000L);
                 if (job.total() == 0 && job.blastPoints() == 0) {
                     job.cancel();
                     fail(speaker, transcript, "nothing there to " + (destroy ? "destroy" : "mine"));
                     return;
                 }
+                int size = (job.maxX - job.minX + 1);
+                int areaBlocks = job.total();
                 int tools = 0, tnt = 0;
                 for (PvPBot b : bots) {
                     b.setForcedTarget(null);
                     b.getAI().getContext().excavationController.join(job);
                     Player bp = b.getBukkitPlayer();
+                    if (bp != null && explorers.contains(b)) job.addProspectorLane(b.getUUID(), bp.getLocation());
                     if (bp == null) continue;
                     if (com.pvpbot.ai.ExcavationController.hasTntKit(bp)) tnt++;
                     for (org.bukkit.inventory.ItemStack it : bp.getInventory().getStorageContents()) {
@@ -560,12 +577,12 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         if (n.endsWith("_PICKAXE") || n.endsWith("_SHOVEL")) { tools++; break; }
                     }
                 }
-                int size = (job.maxX - job.minX + 1);
                 String extra = destroy
                         ? (tnt > 0 ? ", " + tnt + " with TNT" : ", no TNT - using tools")
                         : (tools < bots.size() ? ", " + (bots.size() - tools) + " without a pickaxe/shovel" : "");
                 ok(speaker, transcript, who + " → " + (destroy ? "destroying" : "mining") + " a "
-                        + size + "×" + size + " area, " + job.total() + " blocks (" + bots.size() + extra + ")");
+                        + size + "×" + size + " area, " + areaBlocks + " blocks (" + bots.size() + extra + ")"
+                        + (explorers.isEmpty() ? "" : " - " + explorers.size() + " tunnelling off on their own"));
             }
             case MINE_TO -> {
                 Player victim = switch (order.targetKind()) {

@@ -446,8 +446,7 @@ public class ExcavationController {
                 mine(botPlayer, handle, target, true);
                 return;
             }
-            if (job.contains(blocker.getX(), blocker.getY(), blocker.getZ())
-                    && !job.isSealed(blocker.getX(), blocker.getY(), blocker.getZ())
+            if (job.mayDig(blocker.getX(), blocker.getY(), blocker.getZ())
                     && ExcavationJob.breakable(blocker.getType())) {
                 mine(botPlayer, handle, blocker, false); // it's part of the job anyway
                 return;
@@ -800,7 +799,7 @@ public class ExcavationController {
     // In water inside the job (or right at its edge) with something diggable
     // under the water: time to go under it.
     private boolean shouldDive(Player botPlayer) {
-        if (job.isLaneJob()) return false;
+        if (job.isLaneJob() || job.hasLane(context.bot.getUUID())) return false;
         if (diveCooldown > 0 || divesDone >= MAX_DIVES) return false;
         Location l = botPlayer.getLocation();
         if (!isWater(l.getBlock())) return false;
