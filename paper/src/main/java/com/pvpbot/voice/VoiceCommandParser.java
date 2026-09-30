@@ -35,7 +35,9 @@ public final class VoiceCommandParser {
         BREAK_FORMATION,
         MINE,       // excavate the area the speaker is looking at
         DESTROY,    // level it - TNT if they carry it, tools otherwise
-        WORK_STOP   // stop mining / destroying
+        WORK_STOP,  // stop mining / destroying
+        PILLAR_TO,  // walk / bridge / pillar up to a player, then fight them
+        BOW         // shoot a player with bows from range
     }
 
     public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION }
@@ -136,6 +138,13 @@ public final class VoiceCommandParser {
                     "push forward", "move forward", "move up", "move out", "move together",
                     "keep moving", "keep pushing", "lets go", "lets move", "go go go", "go go",
                     "advance"),
+            rule(Intent.PILLAR_TO,
+                    "pillar up to {p}", "pillar to {p}", "pillar up at {p}", "tower up to {p}",
+                    "tower to {p}", "build up to {p}", "climb up to {p}", "climb to {p}",
+                    "go up to {p}", "get up to {p}", "get to {p}", "reach {p}"),
+            rule(Intent.BOW,
+                    "use your bows on {p}", "use bows on {p}", "bows on {p}", "bow on {p}",
+                    "shoot at {p}", "shoot {p}", "bow {p}", "snipe {p}", "arrow {p}", "fire at {p}"),
             rule(Intent.RUSH,
                     "push them now", "push them", "rush them", "get them", "attack them", "kill them",
                     "go get them", "charge"),
@@ -283,7 +292,7 @@ public final class VoiceCommandParser {
         Parsed resolved = resolveTarget(intent, subject, addressed, nameWords, lookVerb, factions, names);
         if (resolved == null) return null;
         // Unaddressed + couldn't tell who: almost certainly chatter, ignore.
-        if (!addressed && resolved.targetKind() == TargetKind.NONE && resolved.intent() == Intent.ATTACK) {
+        if (!addressed && resolved.targetKind() == TargetKind.NONE && resolved.intent() != Intent.RUSH) {
             return null;
         }
         return resolved;
@@ -303,7 +312,11 @@ public final class VoiceCommandParser {
             if (NEAREST_WORDS.contains(w)) return new Parsed(subject, addressed, intent, TargetKind.NEAREST, null, heard);
         }
         if (words.size() <= 2 && GROUP_WORDS.contains(words.get(words.size() - 1))) {
-            return new Parsed(subject, addressed, Intent.RUSH, TargetKind.NONE, null, heard);
+            // "kill them" = everyone picks a target; "shoot them" / "pillar
+            // up to them" = the nearest enemy.
+            return intent == Intent.ATTACK
+                    ? new Parsed(subject, addressed, Intent.RUSH, TargetKind.NONE, null, heard)
+                    : new Parsed(subject, addressed, intent, TargetKind.NEAREST, null, heard);
         }
 
         for (int i = 0; i < words.size(); i++) {
@@ -321,6 +334,16 @@ public final class VoiceCommandParser {
         }
 
         String match = bestName(meaningful, names);
+        if (match == null) {
+            // Filler words can be part of a misheard name ("by an apple" for
+            // Pinapple): retry with everything but the edges trimmed.
+            List<String> trimmed = new ArrayList<>(words);
+            while (!trimmed.isEmpty() && NAME_FILLER.contains(trimmed.get(0))) trimmed.remove(0);
+            while (!trimmed.isEmpty() && NAME_FILLER.contains(trimmed.get(trimmed.size() - 1))) {
+                trimmed.remove(trimmed.size() - 1);
+            }
+            if (!trimmed.equals(meaningful) && !trimmed.isEmpty()) match = bestName(trimmed, names);
+        }
         if (match != null) return new Parsed(subject, addressed, intent, TargetKind.NAME, match, heard);
         return new Parsed(subject, addressed, intent, TargetKind.NONE, null, heard);
     }
@@ -352,25 +375,40 @@ public final class VoiceCommandParser {
     public static String bestName(List<String> spokenWords, Collection<String> names) {
         if (names == null || names.isEmpty() || spokenWords.isEmpty()) return null;
 
-        Set<String> spoken = new LinkedHashSet<>();
-        for (int i = 0; i < spokenWords.size(); i++) {
-            for (int j = i + 1; j <= spokenWords.size(); j++) {
+        // Every contiguous run of the heard words, with a penalty for each
+        // word it leaves out: "pine apple" should be one name (Pinapple),
+        // not the player called Apple plus a stray "pine".
+        Map<String, Double> spoken = new java.util.LinkedHashMap<>();
+        int total = spokenWords.size();
+        for (int i = 0; i < total; i++) {
+            for (int j = i + 1; j <= total; j++) {
                 List<String> span = spokenWords.subList(i, j);
-                spoken.add(join(span, false));
-                spoken.add(join(span, true));
+                double penalty = UNUSED_WORD_PENALTY * (total - span.size());
+                for (String form : List.of(join(span, false), join(span, true))) {
+                    if (form.isEmpty()) continue;
+                    spoken.merge(form, penalty, Math::min);
+                }
             }
         }
-        spoken.removeIf(String::isEmpty);
 
         String best = null;
         double bestScore = 0.0, secondScore = 0.0;
         for (String name : names) {
             double score = 0.0;
             for (String form : nameForms(name)) {
-                for (String s : spoken) {
-                    score = Math.max(score, similarity(s, form));
-                    score = Math.max(score, similarity(soundKey(s), soundKey(form)) - 0.05);
-                    score = Math.max(score, prefixScore(s, form));
+                String formKey = consonantKey(form);
+                for (Map.Entry<String, Double> e : spoken.entrySet()) {
+                    String s = e.getKey();
+                    double sc = similarity(s, form);
+                    sc = Math.max(sc, similarity(soundKey(s), soundKey(form)) - 0.05);
+                    sc = Math.max(sc, prefixScore(s, form));
+                    // Speech engines swap in real words that share the
+                    // consonants: "by an apple" / "been apple" for Pinapple.
+                    String sk = consonantKey(s);
+                    if (sk.length() >= 3 && formKey.length() >= 3) {
+                        sc = Math.max(sc, similarity(sk, formKey) - 0.1);
+                    }
+                    score = Math.max(score, sc - e.getValue());
                 }
             }
             if (score > bestScore) {
@@ -432,6 +470,28 @@ public final class VoiceCommandParser {
             sb.append(d != null ? d : w);
         }
         return sb.toString().replaceAll("[^a-z0-9]", "");
+    }
+
+    static final double UNUSED_WORD_PENALTY = 0.2;
+
+    // Consonant skeleton with voiced/unvoiced pairs merged (b/p, d/t, g/k,
+    // v/f, z/s) and vowels dropped - roughly what survives a misheard name.
+    static String consonantKey(String s) {
+        String k = s.toLowerCase(Locale.ROOT)
+                .replace('0', 'o').replace('1', 'i').replace('3', 'e').replace('4', 'a').replace('5', 's')
+                .replaceAll("[^a-z]", "")
+                .replace("ph", "f").replace("ck", "k").replace("qu", "kw").replace("th", "t")
+                .replace("sh", "s").replace("ch", "k").replace("x", "ks").replace("c", "k")
+                .replace('q', 'k').replace('b', 'p').replace('d', 't').replace('g', 'k')
+                .replace('v', 'f').replace('z', 's').replace('w', 'u')
+                .replaceAll("[aeiouy]", "");
+        StringBuilder sb = new StringBuilder();
+        char prev = 0;
+        for (char ch : k.toCharArray()) {
+            if (ch != prev) sb.append(ch);
+            prev = ch;
+        }
+        return sb.toString();
     }
 
     static String soundKey(String s) {

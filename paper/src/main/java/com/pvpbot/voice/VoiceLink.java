@@ -203,6 +203,12 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             return;
         }
         Set<String> factions = factionsOf(manager, bots);
+        // Any new order replaces a climb-to or bow order in progress.
+        for (PvPBot b : bots) {
+            var ctx = b.getAI().getContext();
+            ctx.reachController.stop();
+            ctx.archerController.stop();
+        }
         boolean movement = switch (order.intent()) {
             case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, FORMATION, BREAK_FORMATION -> true;
             default -> false;
@@ -273,6 +279,58 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     int sent = spreadOver(bots, threats);
                     ok(speaker, transcript, who + " → engaging " + threats.size()
                             + " threat(s) near you (" + sent + ")");
+                }
+            }
+            case PILLAR_TO, BOW -> {
+                releaseStandDown(manager, factions, bots);
+                cancelFollow(speaker.getUniqueId());
+                Player victim = switch (order.targetKind()) {
+                    case NAME -> resolveName(manager, order.target());
+                    case LOOK -> lookedAt(speaker);
+                    case NEAREST -> nearest(speaker.getLocation(),
+                            enemiesNear(manager, speaker, speaker.getLocation(), NEAREST_RANGE),
+                            speaker.getUniqueId());
+                    default -> null;
+                };
+                if (victim == null) {
+                    fail(speaker, transcript, order.targetKind() == VoiceCommandParser.TargetKind.NAME
+                            ? order.target() + " isn't online"
+                            : order.heardTarget() != null && !order.heardTarget().isBlank()
+                            ? "no player sounds like \"" + order.heardTarget() + "\""
+                            : "look at who you mean");
+                    return;
+                }
+                if (victim.getUniqueId().equals(speaker.getUniqueId())) {
+                    fail(speaker, transcript, "they won't turn on you");
+                    return;
+                }
+                String vName = ChatColor.stripColor(victim.getName());
+                if (order.intent() == Intent.PILLAR_TO) {
+                    int sent = 0, given = 0;
+                    for (PvPBot b : bots) {
+                        if (b.getUUID().equals(victim.getUniqueId())) continue;
+                        b.getAI().getContext().excavationController.abort();
+                        if (b.getAI().getContext().reachController.start(victim)) given++;
+                        sent++;
+                    }
+                    ok(speaker, transcript, who + " → pillaring up to " + vName + " (" + sent + ")"
+                            + (given > 0 ? " - gave " + given + " cobblestone" : ""));
+                } else {
+                    int archers = 0, melee = 0;
+                    for (PvPBot b : bots) {
+                        if (b.getUUID().equals(victim.getUniqueId())) continue;
+                        b.getAI().getContext().excavationController.abort();
+                        Player bp = b.getBukkitPlayer();
+                        if (bp != null && com.pvpbot.ai.ArcherController.hasBowAndArrows(bp)) {
+                            b.getAI().getContext().archerController.start(victim);
+                            archers++;
+                        } else {
+                            b.setForcedTarget(victim);
+                            melee++;
+                        }
+                    }
+                    ok(speaker, transcript, who + " → shooting " + vName + " (" + archers + " with bows"
+                            + (melee > 0 ? ", " + melee + " without - melee" : "") + ")");
                 }
             }
             case FORMATION -> {

@@ -666,6 +666,8 @@ public class PvPBot {
 
                 ai.getContext().buildController.abort();
                 ai.getContext().excavationController.abort();
+                ai.getContext().reachController.stop();
+                ai.getContext().archerController.stop();
             }
         } catch (Throwable ignored) {
         }

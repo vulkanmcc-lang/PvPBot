@@ -37,7 +37,8 @@ public final class VoiceLinkClient implements ClientModInitializer {
             "stop", "hold", "nobody", "calm", "save", "come", "follow", "group", "meet", "regroup",
             "stay", "move", "lets", "keep", "go", "watch", "behind", "theyre", "wait", "we",
             "mine", "dig", "excavate", "destroy", "blow", "demolish", "level", "flatten", "break",
-            "fall", "form", "line", "at", "dismissed", "quit");
+            "fall", "form", "line", "at", "dismissed", "quit", "pillar", "tower", "climb", "reach",
+            "bow", "bows", "shoot", "snipe", "fire", "use");
 
     private static final Set<String> LEAD_IN = Set.of(
             "ok", "okay", "hey", "yo", "alright", "right", "so", "and", "uh", "um", "now", "oi");

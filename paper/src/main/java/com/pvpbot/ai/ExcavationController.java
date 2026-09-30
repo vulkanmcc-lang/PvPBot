@@ -24,7 +24,7 @@ public class ExcavationController {
 
     private static final double REACH = 4.3;
     private static final double REACH_SQ = REACH * REACH;
-    private static final int STALL_TICKS = 70;
+    private static final int STALL_TICKS = 50;
     private static final int IDLE_GIVE_UP_TICKS = 400;
     private static final double FLEE_DISTANCE = 9.0;
     private static final int FUSE_TICKS = 80;
@@ -72,6 +72,12 @@ public class ExcavationController {
         abort();
         this.job = job;
         this.phase = Phase.WORK;
+        job.addCrew(context.bot.getUUID());
+        // A leftover "walk to this spot" order (come here / regroup) would
+        // otherwise take priority over the work every tick.
+        context.movementController.clearFormationOrder();
+        context.currentPath.clear();
+        context.pathNodeIndex = 0;
     }
 
     public void abort() {
@@ -79,6 +85,7 @@ public class ExcavationController {
         if (job != null) {
             job.release(cell);
             job.release(blast);
+            job.removeCrew(context.bot.getUUID());
         }
         job = null;
         cell = null;
@@ -195,8 +202,17 @@ public class ExcavationController {
             }
         }
 
-        // Walk to somewhere we can reach and see it from.
+        // Walk to somewhere we can reach and see it from. No such spot at
+        // all (a treetop, a roof out of reach): skip it now instead of
+        // walking into the wall for seconds.
         Location spot = standSpotFor(botPlayer, target);
+        if (spot == null && distSq > REACH_SQ) {
+            job.fail(cell);
+            job.fail(cell);
+            job.fail(cell);
+            cell = null;
+            return;
+        }
         walkTo(botPlayer, spot != null ? spot : target.getLocation().add(0.5, 1.0, 0.5));
         if (stalled(botPlayer)) {
             job.fail(cell);
@@ -241,14 +257,30 @@ public class ExcavationController {
         breakProgress = 0f;
 
         int bx = block.getX(), by = block.getY(), bz = block.getZ();
-        boolean ok;
+        boolean ok = false;
         try {
             // Real survival break: events, protection plugins, drops, tool wear.
             ok = botPlayer.breakBlock(block);
-        } catch (Throwable t) {
+        } catch (Throwable ignored) {
+        }
+        if (!ok && ExcavationJob.breakable(block.getType())) {
+            // breakBlock can refuse for fake players (game-mode / reach
+            // checks); do it the plugin way, still respecting protection.
             org.bukkit.event.block.BlockBreakEvent ev = new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
             org.bukkit.Bukkit.getPluginManager().callEvent(ev);
-            ok = !ev.isCancelled() && block.breakNaturally(botPlayer.getInventory().getItemInMainHand());
+            if (!ev.isCancelled()) {
+                try {
+                    job.world.playSound(block.getLocation(),
+                            block.getBlockData().getSoundGroup().getBreakSound(), 1.0f, 1.0f);
+                } catch (Throwable ignored) {
+                }
+                if (ev.isDropItems()) {
+                    ok = block.breakNaturally(botPlayer.getInventory().getItemInMainHand());
+                } else {
+                    block.setType(Material.AIR);
+                    ok = true;
+                }
+            }
         }
 
         if (!ok && ExcavationJob.breakable(block.getType())) {

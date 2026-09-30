@@ -571,6 +571,8 @@ public class BotAIContext {
     public MiningController miningController;
     public AreaMiningController areaMiningController;
     public ExcavationController excavationController;
+    public ReachController reachController;
+    public ArcherController archerController;
     public TechniqueController techniqueController;
     public CartController cartController;
     public TunnelController tunnelController;
@@ -629,6 +631,8 @@ public class BotAIContext {
         if (miningController != null && miningController.isActive()) return false;
         if (areaMiningController != null && areaMiningController.isActive()) return false;
         if (excavationController != null && excavationController.isActive()) return false;
+        if (reachController != null && reachController.isActive()) return false;
+        if (archerController != null && archerController.isActive()) return false;
         if (farmController != null && farmController.isActive()) return false;
         if (deliveryController != null && deliveryController.isActive()) return false;
         if (patrolController != null && patrolController.isActive()) return false;
@@ -657,6 +661,8 @@ public class BotAIContext {
         this.miningController = new MiningController(this);
         this.areaMiningController = new AreaMiningController(this);
         this.excavationController = new ExcavationController(this);
+        this.reachController = new ReachController(this);
+        this.archerController = new ArcherController(this);
         this.techniqueController = new TechniqueController(this);
         this.cartController = new CartController(this);
         this.tunnelController = new TunnelController(this);

@@ -31,10 +31,13 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)* |
 | Destroy | everyone destroy the area · blow it up *(15×15; bots with TNT + flint & steel blast it, the rest use tools)* |
 | Stop mining | everyone stop mining · stop digging · stop destroying |
+| Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight)* |
+| Bow | everyone bow *name* · shoot *name* · use your bows on *name* *(bots with a bow + arrows keep range and shoot; the rest go melee)* |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
 
 Names don't have to be pronounceable: `NexarVo1d` works as "nexar void" (or
-just "nexar"), `Steve123` as "steve", `xDarkKnightx` as "dark knight". The
+just "nexar"), `Steve123` as "steve", `xDarkKnightx` as "dark knight",
+`Pinapple` as "pineapple" / "pine apple" (or even a misheard "by an apple"). The
 server fuzzy-matches what you said against the players and bots online.
 
 Start with "everyone" / "guys" / a faction name, or open the sentence with

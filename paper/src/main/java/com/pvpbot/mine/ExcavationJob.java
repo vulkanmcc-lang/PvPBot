@@ -35,6 +35,8 @@ public final class ExcavationJob {
         int leaseTicks;
         int failures;
         boolean done;
+        // Crew members without the right tool for it (stone with no pickaxe).
+        java.util.Set<UUID> cannot;
 
         Cell(int x, int y, int z) {
             this.x = x;
@@ -72,6 +74,7 @@ public final class ExcavationJob {
     private final Map<Long, Cell> byPos = new HashMap<>();
     private final List<BlastPoint> blasts = new ArrayList<>();
     private final long deadline;
+    private final java.util.Set<UUID> crew = new java.util.HashSet<>();
 
     private int topY;
     private int lastTick = Integer.MIN_VALUE;
@@ -79,7 +82,7 @@ public final class ExcavationJob {
     private int blasted = 0;
     private boolean cancelled = false;
 
-    private ExcavationJob(Mode mode, World world, UUID requester,
+    private ExcavationJob(Mode mode, World world, UUID requester, long durationMs,
                           int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
         this.mode = mode;
         this.world = world;
@@ -90,21 +93,27 @@ public final class ExcavationJob {
         this.maxX = maxX;
         this.maxY = maxY;
         this.maxZ = maxZ;
-        this.deadline = System.currentTimeMillis() + MAX_DURATION_MS;
+        this.deadline = System.currentTimeMillis() + durationMs;
     }
 
     // Starts (replacing any previous job by the same speaker) a job for the
     // area centred on `center`.
     public static ExcavationJob start(Mode mode, UUID requester, Location center) {
+        return mode == Mode.MINE
+                ? start(mode, requester, center, 5, 2, 4, MAX_DURATION_MS)
+                : start(mode, requester, center, 7, 6, 2, MAX_DURATION_MS);
+    }
+
+    // radius: half-width of the square; up/down: layers above/below center.
+    public static ExcavationJob start(Mode mode, UUID requester, Location center,
+                                      int radius, int up, int down, long durationMs) {
         World w = center.getWorld();
         int cx = center.getBlockX(), cy = center.getBlockY(), cz = center.getBlockZ();
-        int r = mode == Mode.MINE ? 5 : 7;
-        int up = mode == Mode.MINE ? 2 : 10;
-        int down = mode == Mode.MINE ? 4 : 2;
+        int r = Math.max(1, radius);
         int minY = Math.max(w.getMinHeight() + 1, cy - down);
         int maxY = Math.min(w.getMaxHeight() - 1, cy + up);
 
-        ExcavationJob job = new ExcavationJob(mode, w, requester,
+        ExcavationJob job = new ExcavationJob(mode, w, requester, durationMs,
                 cx - r, minY, cz - r, cx + r, maxY, cz + r);
         job.scan(cx, cz);
 
@@ -215,7 +224,14 @@ public final class ExcavationJob {
                 continue;
             }
             if (underSomeone(c, botPlayer)) continue;
-            if (!canBreak.test(b)) continue;
+            if (!canBreak.test(b)) {
+                // Nobody on the crew has the tool for it: skip it rather than
+                // let the whole job wait on it forever.
+                if (c.cannot == null) c.cannot = new java.util.HashSet<>();
+                c.cannot.add(bot);
+                if (c.cannot.size() >= Math.max(1, crew.size())) c.done = true;
+                continue;
+            }
             double dx = c.x + 0.5 - at.getX(), dy = c.y + 0.5 - at.getY(), dz = c.z + 0.5 - at.getZ();
             double d = dx * dx + dy * dy * 2.0 + dz * dz;
             if (d < bestD) {
@@ -263,6 +279,14 @@ public final class ExcavationJob {
             best.leaseTicks = LEASE_TICKS;
         }
         return best;
+    }
+
+    public void addCrew(UUID bot) {
+        crew.add(bot);
+    }
+
+    public void removeCrew(UUID bot) {
+        crew.remove(bot);
     }
 
     public boolean hasBlastsLeft() {

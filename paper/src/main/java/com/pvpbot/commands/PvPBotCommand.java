@@ -1469,9 +1469,9 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 if (args.length < 3) {
                     sender.sendMessage("§cUsage: /pvpbot faction minearea <faction> [radius] [seconds]");
                     sender.sendMessage("§c   or: /pvpbot faction <faction> minearea [radius] [seconds]");
-                    sender.sendMessage("§8  Bots in the faction will mine blocks around their leader.");
-                    sender.sendMessage("§8  They break grass with fists, then mine stone with pickaxes.");
-                    sender.sendMessage("§8  Each bot has its own path to avoid collisions.");
+                    sender.sendMessage("§8  Bots dig out the square around the block you're looking at");
+                    sender.sendMessage("§8  (or their leader), top layer first, 4 deep, with the right tool per block.");
+                    sender.sendMessage("§8  Blocks are shared out so bots don't get in each other's way.");
                     sender.sendMessage("§8  /pvpbot faction minearea <faction> stop §7— end mining");
                     sender.sendMessage("§8  /pvpbot faction <faction> minearea stop §7— end mining");
                     return;
@@ -1881,11 +1881,12 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             com.pvpbot.mine.AreaMiningJob.stop(factionName);
             int stopped = 0;
             for (PvPBot bot : botManager.getFactionBots(factionName)) {
-                if (bot.getAI().getContext().areaMiningController != null 
-                        && bot.getAI().getContext().areaMiningController.isActive()) {
-                    bot.getAI().getContext().areaMiningController.abort();
-                    stopped++;
-                }
+                var ctx = bot.getAI().getContext();
+                boolean was = (ctx.areaMiningController != null && ctx.areaMiningController.isActive())
+                        || (ctx.excavationController != null && ctx.excavationController.isActive());
+                if (ctx.areaMiningController != null) ctx.areaMiningController.abort();
+                if (ctx.excavationController != null) ctx.excavationController.abort();
+                if (was) stopped++;
             }
             sender.sendMessage("§eStopped area mining for " + stopped + " bot(s) in §e" + factionName.toLowerCase() + "§e.");
             return;
@@ -1965,35 +1966,45 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             }
         }
 
+        // Same excavation system as the voice "mine the area": the square
+        // is dug out top layer first, each bot using the right tool per
+        // block. Bots without a pickaxe still help with dirt, sand, plants.
+        eligible.clear();
+        for (PvPBot bot : factionBots) {
+            if (bot.getUUID().equals(leader) || !bot.isAlive()) continue;
+            Player bp = bot.getBukkitPlayer();
+            if (bp != null && bp.getWorld() == leaderPlayer.getWorld()) eligible.add(bot);
+        }
         if (eligible.isEmpty()) {
-            sender.sendMessage("§cNo eligible bots in faction §e" + factionName.toLowerCase() + "§c have pickaxes.");
+            sender.sendMessage("§cFaction §e" + factionName.toLowerCase() + "§c has no bots here to mine.");
             return;
         }
 
-        com.pvpbot.mine.AreaMiningJob job = com.pvpbot.mine.AreaMiningJob.start(
-                factionName, leaderPlayer.getWorld(), leaderPlayer.getLocation(), 
-                radius, seconds, sender.getUniqueId());
-
-        int joined = 0;
+        int r = (int) Math.round(radius);
+        if (r > 24) {
+            sender.sendMessage("§7Radius capped at §f24§7 (bigger areas take forever to dig by hand).");
+            r = 24;
+        }
+        org.bukkit.block.Block looked = sender.getTargetBlockExact(48);
+        Location center = looked != null ? looked.getLocation() : leaderPlayer.getLocation().subtract(0, 1, 0);
+        com.pvpbot.mine.ExcavationJob job = com.pvpbot.mine.ExcavationJob.start(
+                com.pvpbot.mine.ExcavationJob.Mode.MINE, sender.getUniqueId(), center, r, 2, 4,
+                seconds * 1000L);
+        if (job.total() == 0) {
+            job.cancel();
+            sender.sendMessage("§cNothing to mine there.");
+            return;
+        }
         for (PvPBot bot : eligible) {
-            String error = bot.getAI().getContext().areaMiningController.join(job, eligible.size());
-            if (error == null) {
-                joined++;
-            } else {
-                sender.sendMessage("§cBot §e" + bot.getName() + "§c couldn't join: §e" + error);
-            }
+            bot.getAI().getContext().areaMiningController.abort();
+            bot.getAI().getContext().excavationController.join(job);
         }
 
-        if (joined == 0) {
-            com.pvpbot.mine.AreaMiningJob.stop(factionName);
-            sender.sendMessage("§cNo bots could start mining.");
-            return;
-        }
-
-        sender.sendMessage("§a" + joined + " bot(s) from §e" + factionName.toLowerCase() + "§a are now mining around their leader.");
-        sender.sendMessage("§7Radius: §f" + radius + "§7 blocks, Time: §f" + seconds + "§7s.");
+        sender.sendMessage("§a" + eligible.size() + " bot(s) from §e" + factionName.toLowerCase()
+                + "§a are digging out a §f" + (2 * r + 1) + "×" + (2 * r + 1) + "§a area (§f"
+                + job.total() + "§a blocks, up to §f" + seconds + "§as).");
         if (noPick > 0) {
-            sender.sendMessage("§8  " + noPick + " skipped — no pickaxe.");
+            sender.sendMessage("§8  " + noPick + " have no pickaxe — they'll take the soft blocks.");
         }
     }
 
@@ -2920,6 +2931,9 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         }
 
         player.sendMessage("§7" + ctx.maceController.debugLine());
+        player.sendMessage("§7work: §f" + ctx.excavationController.status()
+                + " §7reach: §f" + ctx.reachController.status()
+                + " §7bow: §f" + ctx.archerController.status());
 
         for (org.bukkit.potion.PotionEffect e : bp.getActivePotionEffects()) {
             if (e.getType().equals(org.bukkit.potion.PotionEffectType.SLOWNESS)) {

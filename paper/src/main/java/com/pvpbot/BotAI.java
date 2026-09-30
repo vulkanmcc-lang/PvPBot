@@ -272,6 +272,20 @@ public class BotAI {
             return;
         }
 
+        if (context.reachController.handleReach(botPlayer)) {
+            context.navBranch = "REACH";
+            context.inventoryController.manageOffhand(botPlayer);
+            finishTick(handle);
+            return;
+        }
+
+        if (context.archerController.handleArcher(botPlayer)) {
+            context.navBranch = "ARCHER";
+            context.inventoryController.manageOffhand(botPlayer);
+            finishTick(handle);
+            return;
+        }
+
         boolean excavationOwns = context.excavationController.handleExcavation(botPlayer);
         if (excavationOwns) {
             context.navBranch = "EXCAVATE";
