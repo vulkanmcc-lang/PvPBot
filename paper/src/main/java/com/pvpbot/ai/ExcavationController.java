@@ -19,8 +19,16 @@ import org.bukkit.inventory.meta.Damageable;
 // break it with the right tool (pickaxe / shovel / axe / hands), repeat.
 // In DESTROY jobs a bot carrying TNT + flint & steel first works through the
 // job's blast points: walk up, place TNT, light it, run, wait for the bang.
+//
+// Water: a block with water beside or above it is never simply broken (the
+// water would pour into the dig). The bot plugs that water with a block
+// first, then breaks it. A bot that ends up standing in water inside the
+// job (a lake or river over the area) dives: it sinks to the bottom, digs
+// three blocks straight down, caps the shaft above its head so the water
+// can't follow, waits for the shaft to drain and carries on mining from
+// underneath - the lake stays on top of a sealed roof.
 public class ExcavationController {
-    private enum Phase { IDLE, WORK, BLAST_PLACE, BLAST_FLEE }
+    private enum Phase { IDLE, WORK, BLAST_PLACE, BLAST_FLEE, DIVE }
 
     private static final double REACH = 4.3;
     private static final double REACH_SQ = REACH * REACH;
@@ -50,6 +58,24 @@ public class ExcavationController {
     private int fleeTicks;
     private TNTPrimed lit;
 
+    // Water handling
+    private static final int DIVE_DEPTH = 3;
+    private static final int DIVE_TIMEOUT = 500;
+    private static final int DIVE_COOLDOWN = 120;
+    private static final int MAX_DIVES = 8;
+    private static final int LOW_AIR = 90;
+    private static final int GIVE_SEAL_BLOCKS = 32;
+    private static final int WET_RETRY_TICKS = 80;
+    private int diveX, diveZ;
+    private int diveStartY = Integer.MIN_VALUE;
+    private int diveTicks;
+    private int diveSealedAt = -1;
+    private int diveCooldown;
+    private int divesDone;
+    private int dryTicks;
+    private boolean wet;          // this job has water in it: be patient with cells
+    private boolean gaveSealBlocks;
+
     public ExcavationController(BotAIContext context) {
         this.context = context;
     }
@@ -73,6 +99,10 @@ public class ExcavationController {
         this.job = job;
         this.phase = Phase.WORK;
         job.addCrew(context.bot.getUUID());
+        wet = false;
+        gaveSealBlocks = false;
+        divesDone = 0;
+        diveCooldown = 0;
         // A leftover "walk to this spot" order (come here / regroup) would
         // otherwise take priority over the work every tick.
         context.movementController.clearFormationOrder();
@@ -96,6 +126,9 @@ public class ExcavationController {
         stallTicks = 0;
         idleTicks = 0;
         lit = null;
+        diveStartY = Integer.MIN_VALUE;
+        diveSealedAt = -1;
+        context.waterSinkTicks = 0;
     }
 
     public static boolean hasTntKit(Player p) {
@@ -133,7 +166,18 @@ public class ExcavationController {
         }
         if (repathCooldown > 0) repathCooldown--;
         if (blastCooldown > 0) blastCooldown--;
+        if (diveCooldown > 0) diveCooldown--;
         context.suppressSprint = true;
+
+        if (phase == Phase.DIVE) {
+            tickDive(botPlayer, handle);
+            return true;
+        }
+        if (phase == Phase.WORK && shouldDive(botPlayer)) {
+            startDive(botPlayer);
+            tickDive(botPlayer, handle);
+            return true;
+        }
 
         if (phase == Phase.BLAST_PLACE) {
             tickBlastPlace(botPlayer, handle);
@@ -261,6 +305,7 @@ public class ExcavationController {
                 return;
             }
             if (job.contains(blocker.getX(), blocker.getY(), blocker.getZ())
+                    && !job.isSealed(blocker.getX(), blocker.getY(), blocker.getZ())
                     && ExcavationJob.breakable(blocker.getType())) {
                 mine(botPlayer, handle, blocker, false); // it's part of the job anyway
                 return;
@@ -272,15 +317,22 @@ public class ExcavationController {
         // walking into the wall for seconds.
         Location spot = standSpotFor(botPlayer, target);
         if (spot == null && distSq > REACH_SQ) {
-            job.fail(cell);
-            job.fail(cell);
-            job.fail(cell);
+            if (wet) {
+                // Under water: it may become reachable once the dry part of
+                // the dig gets to it. Try others first, come back later.
+                job.defer(cell, WET_RETRY_TICKS);
+            } else {
+                job.fail(cell);
+                job.fail(cell);
+                job.fail(cell);
+            }
             cell = null;
             return;
         }
         walkTo(botPlayer, spot != null ? spot : target.getLocation().add(0.5, 1.0, 0.5));
         if (stalled(botPlayer)) {
-            job.fail(cell);
+            if (wet) job.defer(cell, WET_RETRY_TICKS);
+            else job.fail(cell);
             cell = null;
             context.currentPath.clear();
             context.pathNodeIndex = 0;
@@ -291,6 +343,43 @@ public class ExcavationController {
         context.forwardInput = 0f;
         context.strafeInput = 0f;
         stallTicks = 0;
+
+        if (breaking == null || !breaking.equals(block)) {
+            // Plug any water next to it before opening it up.
+            int w = sealWaterAround(botPlayer, handle, block);
+            if (w == 0) return; // placed a plug this tick - break it next time
+            if (w < 0) {
+                if (cell != null) {
+                    if (wet) job.defer(cell, WET_RETRY_TICKS);
+                    else job.fail(cell);
+                    cell = null;
+                }
+                return;
+            }
+        }
+
+        int r = breakStep(botPlayer, handle, block);
+        if (r == 0) return;
+        int bx = block.getX(), by = block.getY(), bz = block.getZ();
+        if (r < 0) {
+            // Protected or refused - don't keep hammering it.
+            if (cell != null) {
+                job.fail(cell);
+                cell = null;
+            }
+            return;
+        }
+        if (isCell) {
+            job.complete(cell);
+            cell = null;
+        } else {
+            job.noteBroken(bx, by, bz);
+        }
+    }
+
+    // One tick of breaking `block` at survival speed. 0 = still going,
+    // 1 = broken, -1 = refused (protection plugin, unbreakable).
+    private int breakStep(Player botPlayer, ServerPlayer handle, Block block) {
         lookAt(botPlayer, block.getLocation().add(0.5, 0.5, 0.5));
 
         if (breaking == null || !breaking.equals(block)) {
@@ -310,14 +399,13 @@ public class ExcavationController {
         if (breakTicks == 1) breakTotal = breakTicksFor(botPlayer, block);
         breakProgress = (float) breakTicks / Math.max(1, breakTotal);
         sendStage(block, (int) (breakProgress * 10));
-        if (breakTicks < breakTotal) return;
+        if (breakTicks < breakTotal) return 0;
         pauseTicks = BETWEEN_BLOCKS_TICKS;
 
         clearStage();
         breaking = null;
         breakProgress = 0f;
 
-        int bx = block.getX(), by = block.getY(), bz = block.getZ();
         boolean ok = false;
         try {
             // Real survival break: events, protection plugins, drops, tool wear.
@@ -344,23 +432,8 @@ public class ExcavationController {
             }
         }
 
-        if (!ok && ExcavationJob.breakable(block.getType())) {
-            // Protected or refused - don't keep hammering it.
-            if (isCell) {
-                job.fail(cell);
-                cell = null;
-            } else if (cell != null) {
-                job.fail(cell);
-                cell = null;
-            }
-            return;
-        }
-        if (isCell) {
-            job.complete(cell);
-            cell = null;
-        } else {
-            job.noteBroken(bx, by, bz);
-        }
+        if (!ok && ExcavationJob.breakable(block.getType())) return -1;
+        return 1;
     }
 
     // Can this bot break it in a useful way? Blocks that only drop with the
@@ -415,6 +488,283 @@ public class ExcavationController {
         if (n.startsWith("GOLDEN")) return 2;
         if (n.startsWith("WOODEN")) return 1;
         return 0;
+    }
+
+    // =====================================================================
+    // Water
+    // =====================================================================
+
+    // Water, or something that is water as far as flooding goes (kelp,
+    // seagrass, bubble columns, waterlogged blocks).
+    static boolean isWater(Block b) {
+        Material m = b.getType();
+        if (m == Material.WATER || m == Material.BUBBLE_COLUMN || m == Material.KELP
+                || m == Material.KELP_PLANT || m == Material.SEAGRASS || m == Material.TALL_SEAGRASS) {
+            return true;
+        }
+        return b.getBlockData() instanceof org.bukkit.block.data.Waterlogged wl && wl.isWaterlogged();
+    }
+
+    // Can a plug block simply be put there (it's liquid/plant, not a
+    // waterlogged stair or the like)?
+    private static boolean pluggable(Block b) {
+        Material m = b.getType();
+        return m == Material.WATER || m == Material.BUBBLE_COLUMN || m == Material.KELP
+                || m == Material.KELP_PLANT || m == Material.SEAGRASS || m == Material.TALL_SEAGRASS;
+    }
+
+    private static final org.bukkit.block.BlockFace[] FLOOD_FACES = {
+            org.bukkit.block.BlockFace.UP, org.bukkit.block.BlockFace.NORTH, org.bukkit.block.BlockFace.SOUTH,
+            org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.WEST};
+
+    // Before `block` is broken: every water block that would flow into the
+    // hole (above it or beside it) gets a plug. 1 = nothing to do, 0 = placed
+    // a plug this tick, -1 = there's water we can't plug (out of reach,
+    // waterlogged, no blocks) - leave this block alone.
+    private int sealWaterAround(Player botPlayer, ServerPlayer handle, Block block) {
+        Location eye = botPlayer.getEyeLocation();
+        Block feet = botPlayer.getLocation().getBlock();
+        Block head = feet.getRelative(0, 1, 0);
+        for (org.bukkit.block.BlockFace f : FLOOD_FACES) {
+            Block n = block.getRelative(f);
+            if (!isWater(n)) continue;
+            // Already standing in that water: plugging it would bury us, and
+            // we're wet anyway - the dive logic deals with that.
+            if (n.equals(feet) || n.equals(head)) continue;
+            if (!pluggable(n)) return -1;
+            if (distSq(eye, n) > 5.0 * 5.0) return -1;
+            if (!placeSeal(botPlayer, handle, n)) return -1;
+            return 0;
+        }
+        return 1;
+    }
+
+    // Put a plain block into `at` (water) with a real place event.
+    private boolean placeSeal(Player botPlayer, ServerPlayer handle, Block at) {
+        int slot = sealSlot(botPlayer);
+        if (slot < 0 && !gaveSealBlocks) {
+            // Nothing to plug with: same deal as pillaring - hand out some
+            // cobblestone once so the job doesn't just flood.
+            botPlayer.getInventory().addItem(new ItemStack(Material.COBBLESTONE, GIVE_SEAL_BLOCKS));
+            gaveSealBlocks = true;
+            slot = sealSlot(botPlayer);
+        }
+        if (slot < 0 || slot > 8) return false;
+        Material mat = botPlayer.getInventory().getItem(slot).getType();
+        botPlayer.getInventory().setHeldItemSlot(slot);
+        context.packetBroadcaster.broadcastEquipment();
+        lookAt(botPlayer, at.getLocation().add(0.5, 0.5, 0.5));
+
+        org.bukkit.block.BlockState replaced = at.getState();
+        Block against = at.getRelative(org.bukkit.block.BlockFace.DOWN);
+        for (org.bukkit.block.BlockFace f : FLOOD_FACES) {
+            Block o = at.getRelative(f.getOppositeFace());
+            if (o.getType().isSolid()) {
+                against = o;
+                break;
+            }
+        }
+        at.setType(mat, true);
+        org.bukkit.event.block.BlockPlaceEvent place = new org.bukkit.event.block.BlockPlaceEvent(
+                at, replaced, against, new ItemStack(mat), botPlayer, true,
+                org.bukkit.inventory.EquipmentSlot.HAND);
+        org.bukkit.Bukkit.getPluginManager().callEvent(place);
+        if (place.isCancelled()) {
+            replaced.update(true, true);
+            return false;
+        }
+        consumeOne(botPlayer, slot);
+        handle.swing(InteractionHand.MAIN_HAND, true);
+        context.packetBroadcaster.broadcastAnimation(handle, 0);
+        try {
+            job.world.playSound(at.getLocation().add(0.5, 0.5, 0.5),
+                    at.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 0.8f);
+        } catch (Throwable ignored) {
+        }
+        job.markSealed(at.getX(), at.getY(), at.getZ());
+        wet = true;
+        pauseTicks = Math.max(pauseTicks, 2);
+        clearStage();
+        breaking = null;
+        return true;
+    }
+
+    private static final Material[] SEAL_PREFERRED = {
+            Material.COBBLESTONE, Material.COBBLED_DEEPSLATE, Material.DIRT, Material.NETHERRACK,
+            Material.STONE, Material.DEEPSLATE, Material.ANDESITE, Material.DIORITE, Material.GRANITE,
+            Material.TUFF, Material.BLACKSTONE, Material.END_STONE, Material.COARSE_DIRT,
+            Material.STONE_BRICKS, Material.OAK_PLANKS, Material.SPRUCE_PLANKS};
+
+    // Hotbar slot of something cheap and solid to plug water with.
+    private int sealSlot(Player botPlayer) {
+        for (Material m : SEAL_PREFERRED) {
+            if (!botPlayer.getInventory().contains(m)) continue;
+            int slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == m);
+            if (slot >= 0) return slot;
+        }
+        return context.inventoryController.ensureInHotbar(botPlayer, it -> isPlainBlock(it.getType()));
+    }
+
+    private static boolean isPlainBlock(Material m) {
+        if (!m.isBlock() || !m.isSolid() || !m.isOccluding() || m.hasGravity()) return false;
+        if (m.isInteractable() || m == Material.TNT) return false;
+        String n = m.name();
+        return !(n.contains("ORE") || n.contains("DIAMOND") || n.contains("EMERALD") || n.contains("NETHERITE")
+                || n.contains("GOLD") || n.contains("IRON") || n.contains("LAPIS") || n.contains("REDSTONE")
+                || n.contains("SHULKER") || n.contains("SPAWNER") || n.contains("BEACON") || n.contains("ANCIENT"));
+    }
+
+    // In water inside the job (or right at its edge) with something diggable
+    // under the water: time to go under it.
+    private boolean shouldDive(Player botPlayer) {
+        if (job.mode == ExcavationJob.Mode.TUNNEL) return false;
+        if (diveCooldown > 0 || divesDone >= MAX_DIVES) return false;
+        Location l = botPlayer.getLocation();
+        if (!isWater(l.getBlock())) return false;
+        int x = l.getBlockX(), z = l.getBlockZ();
+        if (x < job.minX - 2 || x > job.maxX + 2 || z < job.minZ - 2 || z > job.maxZ + 2) return false;
+        int y = l.getBlockY();
+        for (int d = 1; d <= 8; d++) {
+            Block b = job.world.getBlockAt(x, y - d, z);
+            if (isWater(b) && pluggable(b)) continue;
+            return ExcavationJob.breakable(b.getType()) && !job.isSealed(b.getX(), b.getY(), b.getZ());
+        }
+        return false;
+    }
+
+    private void startDive(Player botPlayer) {
+        job.release(cell);
+        cell = null;
+        clearStage();
+        breaking = null;
+        breakProgress = 0f;
+        phase = Phase.DIVE;
+        Location l = botPlayer.getLocation();
+        diveX = l.getBlockX();
+        diveZ = l.getBlockZ();
+        diveStartY = Integer.MIN_VALUE;
+        diveTicks = 0;
+        diveSealedAt = -1;
+        dryTicks = 0;
+        wet = true;
+        context.currentPath.clear();
+        context.pathNodeIndex = 0;
+    }
+
+    private void endDive(boolean ok) {
+        phase = Phase.WORK;
+        divesDone++;
+        diveCooldown = ok ? 20 : DIVE_COOLDOWN;
+        diveStartY = Integer.MIN_VALUE;
+        diveSealedAt = -1;
+        clearStage();
+        breaking = null;
+        context.waterSinkTicks = 0;
+        context.currentPath.clear();
+        context.pathNodeIndex = 0;
+    }
+
+    private void tickDive(Player botPlayer, ServerPlayer handle) {
+        diveTicks++;
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
+        Location l = botPlayer.getLocation();
+        int feetY = l.getBlockY();
+        Block feet = job.world.getBlockAt(diveX, feetY, diveZ);
+        Block head = feet.getRelative(0, 1, 0);
+
+        if (diveSealedAt >= 0) {
+            // Capped: wait for the water left in the shaft to drain away.
+            boolean dry = !isWater(feet) && !isWater(head);
+            dryTicks = dry ? dryTicks + 1 : 0;
+            if (dryTicks > 6 || diveTicks - diveSealedAt > 80) endDive(true);
+            return;
+        }
+        context.waterSinkTicks = 2;
+        if (diveTicks > DIVE_TIMEOUT) {
+            endDive(false);
+            return;
+        }
+
+        // Stay over the shaft. Drifted off it before digging started: dig
+        // where we are instead.
+        if (l.getBlockX() != diveX || l.getBlockZ() != diveZ) {
+            if (diveStartY == Integer.MIN_VALUE || diveStartY - feetY <= 0) {
+                diveX = l.getBlockX();
+                diveZ = l.getBlockZ();
+                diveStartY = Integer.MIN_VALUE;
+                feet = job.world.getBlockAt(diveX, feetY, diveZ);
+            }
+        }
+        double cdx = diveX + 0.5 - l.getX(), cdz = diveZ + 0.5 - l.getZ();
+        double off = Math.hypot(cdx, cdz);
+        if (off > 0.2) {
+            context.movementController.worldDirToInputs(handle, cdx / off, cdz / off, 0.35f);
+        }
+
+        Block below = job.world.getBlockAt(diveX, feetY - 1, diveZ);
+        boolean onBottom = handle.onGround() || below.getType().isSolid();
+        if (diveStartY == Integer.MIN_VALUE) {
+            if (!onBottom) return; // still sinking
+            diveStartY = feetY;
+        }
+        int depth = diveStartY - feetY;
+        boolean lowAir = botPlayer.getRemainingAir() < LOW_AIR;
+
+        if (depth >= DIVE_DEPTH || (lowAir && depth >= 2)) {
+            capShaft(botPlayer, handle, feetY);
+            return;
+        }
+        if (lowAir) {
+            // Not deep enough for a cap to hold the water back - surface.
+            endDive(false);
+            return;
+        }
+        if (!onBottom) return; // dropping into the block we just dug
+
+        Material under = job.world.getBlockAt(diveX, feetY - 2, diveZ).getType();
+        boolean diggable = ExcavationJob.breakable(below.getType())
+                && !job.isSealed(below.getX(), below.getY(), below.getZ())
+                && under != Material.LAVA && under != Material.MAGMA_BLOCK
+                && !(under.isAir() && job.world.getBlockAt(diveX, feetY - 3, diveZ).getType().isAir());
+        if (!diggable) {
+            if (depth >= 2) capShaft(botPlayer, handle, feetY);
+            else endDive(false);
+            return;
+        }
+        if (pauseTicks > 0) {
+            pauseTicks--;
+            return;
+        }
+        int r = breakStep(botPlayer, handle, below);
+        if (r > 0) {
+            if (job.isCell(below.getX(), below.getY(), below.getZ())) {
+                job.noteBroken(below.getX(), below.getY(), below.getZ());
+            }
+        } else if (r < 0) {
+            if (depth >= 2) capShaft(botPlayer, handle, feetY);
+            else endDive(false);
+        }
+    }
+
+    // Put the lid on: the block right above the head.
+    private void capShaft(Player botPlayer, ServerPlayer handle, int feetY) {
+        Block cap = job.world.getBlockAt(diveX, feetY + 2, diveZ);
+        if (cap.getType().isSolid()) {
+            job.markSealed(cap.getX(), cap.getY(), cap.getZ());
+            diveSealedAt = diveTicks;
+            return;
+        }
+        if (!pluggable(cap) && !cap.getType().isAir()) {
+            endDive(false);
+            return;
+        }
+        if (placeSeal(botPlayer, handle, cap)) {
+            diveSealedAt = diveTicks;
+            dryTicks = 0;
+        } else {
+            endDive(false);
+        }
     }
 
     // =====================================================================
@@ -603,6 +953,11 @@ public class ExcavationController {
                     if (distSq(eye, target) > REACH_SQ * 0.85) continue;
                     if (firstSolidBetween(eye, target) != null) continue;
                     double d = feet.distanceSquared(me);
+                    // Dry spots first: standing in water means mining at a
+                    // fifth of the speed (and a dive).
+                    if (isWater(job.world.getBlockAt(x, y, z)) || isWater(job.world.getBlockAt(x, y + 1, z))) {
+                        d += 60.0;
+                    }
                     if (d < bestD) {
                         bestD = d;
                         best = feet;

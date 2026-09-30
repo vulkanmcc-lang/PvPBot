@@ -43,24 +43,41 @@ public final class VoiceCommandParser {
         TUNNEL,     // each bot digs its own tunnel the way the speaker faces
         BUILD_UP,   // pillar straight up, each on its own column
         LOOK_AT_ME,
-        PATH        // covered 3-wide bridge to the block the speaker looks at
+        PATH,       // covered 3-wide bridge to the block the speaker looks at
+        ARMOR_BEST, // swap into the strongest armor they carry
+        ARMOR_WORST // swap into the weakest
     }
 
     public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION }
 
     // subjectFaction == null and subjectBot == null means "everyone the
-    // speaker commands"; subjectBot is set for "<bot> come here".
+    // speaker commands"; subjectBot is set for "<bot> come here"; commander
+    // for "commander ..." (the faction's appointed commander bot).
     public record Parsed(String subjectFaction, String subjectBot, boolean addressed, Intent intent,
-                         TargetKind targetKind, String target, String heardTarget) {
+                         TargetKind targetKind, String target, String heardTarget, boolean commander) {
+        Parsed(String subjectFaction, String subjectBot, boolean addressed, Intent intent,
+               TargetKind targetKind, String target, String heardTarget) {
+            this(subjectFaction, subjectBot, addressed, intent, targetKind, target, heardTarget, false);
+        }
+
         Parsed(String subjectFaction, boolean addressed, Intent intent,
                TargetKind targetKind, String target, String heardTarget) {
-            this(subjectFaction, null, addressed, intent, targetKind, target, heardTarget);
+            this(subjectFaction, null, addressed, intent, targetKind, target, heardTarget, false);
         }
 
         Parsed withBot(String bot) {
-            return new Parsed(subjectFaction, bot, addressed, intent, targetKind, target, heardTarget);
+            return new Parsed(subjectFaction, bot, addressed, intent, targetKind, target, heardTarget, commander);
+        }
+
+        Parsed withCommander() {
+            return new Parsed(subjectFaction, subjectBot, addressed, intent, targetKind, target, heardTarget, true);
         }
     }
+
+    // "commander kill Steve": the faction's commander bot. Speech engines
+    // also hand back these for it.
+    private static final Set<String> COMMANDER = Set.of(
+            "commander", "commanders", "comander", "commando", "commandor", "commandeer", "komander");
 
     private static final Set<String> EVERYONE = Set.of(
             "everyone", "everybody", "all", "bots", "team", "guys", "squad", "army",
@@ -102,6 +119,19 @@ public final class VoiceCommandParser {
                     "take your armor off", "take off your armor", "take the armor off", "take armor off",
                     "take off armor", "remove your armor", "remove armor", "unequip your armor",
                     "armor off", "strip down", "strip"),
+            rule(Intent.ARMOR_WORST,
+                    "put your worst armor on", "put on your worst armor", "put your bad armor on",
+                    "put on your bad armor", "put your weak armor on", "put on your weak armor",
+                    "put your weakest armor on", "put on your weakest armor", "put your trash armor on",
+                    "put your crappy armor on", "wear your worst armor", "wear your bad armor",
+                    "equip your worst armor", "equip your bad armor", "worst armor on", "bad armor on",
+                    "weak armor on", "worst armor", "bad armor", "weakest armor", "trash armor"),
+            rule(Intent.ARMOR_BEST,
+                    "put your best armor on", "put on your best armor", "put your good armor on",
+                    "put on your good armor", "put your strongest armor on", "put on your strongest armor",
+                    "put your better armor on", "wear your best armor", "wear your good armor",
+                    "equip your best armor", "equip your good armor", "best armor on", "good armor on",
+                    "strongest armor on", "best armor", "good armor", "strongest armor", "best gear"),
             rule(Intent.ARMOR_ON,
                     "put your armor on", "put on your armor", "put the armor on", "put armor on",
                     "put on armor", "equip your armor", "equip armor", "wear your armor", "armor on",
@@ -156,7 +186,10 @@ public final class VoiceCommandParser {
             rule(Intent.FOLLOW,
                     "follow me in", "follow me", "stay with me", "stick with me", "with me"),
             rule(Intent.WAIT,
-                    "wait here", "stay here", "hold position", "hold here", "wait for me", "wait"),
+                    "stay right here", "stay here", "stay there", "stay put", "stay where you are",
+                    "stay in place", "wait right here", "wait here", "wait there", "hold this position",
+                    "hold your position", "hold position", "hold here", "dont move", "camp here",
+                    "guard here", "wait for me", "wait"),
             rule(Intent.COME,
                     "come to my position", "come to me", "come over here", "come here", "come over",
                     "get over here", "get here", "group up here", "group up", "meet me here", "meet me",
@@ -210,11 +243,17 @@ public final class VoiceCommandParser {
         int start = 0;
         String subjectFaction = null;
         boolean addressed = false;
+        boolean commander = false;
         int subjectFrom = -1, subjectTo = -1;
         for (int i = 0; i < tokens.size() && !addressed; i++) {
             String tok = tokens.get(i);
             int end = -1;
-            if (EVERYONE.contains(tok) && !isPartOfPhrase(tokens, i)) {
+            if (COMMANDER.contains(tok) && onlyLeadInBefore(tokens, i)) {
+                // "commander kill Steve" / "okay commander come here". Only
+                // at the start, so "kill the commander" stays an attack.
+                commander = true;
+                end = i + 1;
+            } else if (EVERYONE.contains(tok) && !isPartOfPhrase(tokens, i)) {
                 end = i + 1;
                 while (end < tokens.size()
                         && Set.of("bots", "of", "you", "guys", "team").contains(tokens.get(end))) {
@@ -239,9 +278,21 @@ public final class VoiceCommandParser {
             }
         }
         if (addressed) {
+            // "red team commander ...": that faction's commander.
+            if (!commander && subjectFaction != null && subjectTo < tokens.size()
+                    && COMMANDER.contains(tokens.get(subjectTo))) {
+                commander = true;
+                subjectTo++;
+            }
             List<String> without = new ArrayList<>(tokens.subList(0, subjectFrom));
             without.addAll(tokens.subList(subjectTo, tokens.size()));
             tokens = without;
+            if (commander) {
+                // Lead-ins before the address ("okay commander ...") go too.
+                while (!tokens.isEmpty() && LEAD_IN.contains(tokens.get(0)) && !startsAnyRule(tokens, 0)) {
+                    tokens = tokens.subList(1, tokens.size());
+                }
+            }
         } else {
             while (start < tokens.size() && LEAD_IN.contains(tokens.get(start))
                     && !startsAnyRule(tokens, start)) {
@@ -272,7 +323,10 @@ public final class VoiceCommandParser {
                 Parsed p = t.slot
                         ? matchSlot(r.intent, t, rest, addressed, subjectFaction, factions, candidateNames)
                         : matchPlain(r.intent, t, rest, addressed, subjectFaction);
-                if (p != null) return subjectBot == null ? p : p.withBot(subjectBot);
+                if (p != null) {
+                    if (subjectBot != null) p = p.withBot(subjectBot);
+                    return commander ? p.withCommander() : p;
+                }
             }
         }
         return null;
@@ -613,6 +667,11 @@ public final class VoiceCommandParser {
         return out;
     }
 
+    private static boolean onlyLeadInBefore(List<String> tokens, int i) {
+        for (int k = 0; k < i; k++) if (!LEAD_IN.contains(tokens.get(k))) return false;
+        return true;
+    }
+
     private static boolean startsAnyRule(List<String> tokens, int at) {
         for (Rule r : RULES) {
             for (Template t : r.templates) {
@@ -689,7 +748,9 @@ public final class VoiceCommandParser {
             Map.entry("tunnels", "tunnel"), Map.entry("tunneling", "tunnel"), Map.entry("tunnelling", "tunnel"),
             Map.entry("funnel", "tunnel"), Map.entry("towers", "tower"), Map.entry("built", "build"),
             Map.entry("building", "build"), Map.entry("paths", "path"), Map.entry("bridges", "bridge"),
-            Map.entry("pat", "path"), Map.entry("pass", "path"), Map.entry("bridging", "bridge"));
+            Map.entry("pat", "path"), Map.entry("pass", "path"), Map.entry("bridging", "bridge"),
+            Map.entry("worse", "worst"), Map.entry("bat", "bad"), Map.entry("vest", "best"),
+            Map.entry("staying", "stay"), Map.entry("stays", "stay"));
 
     static boolean wordMatches(String heard, String want) {
         if (heard.equals(want)) return true;
@@ -715,6 +776,7 @@ public final class VoiceCommandParser {
         for (int i = 0; i < tokens.size(); i++) {
             String t = tokens.get(i);
             if (EVERYONE.contains(t) && !t.equals("all") && !t.equals("team")) return true;
+            if (COMMANDER.contains(t) && onlyLeadInBefore(tokens, i)) return true;
             if (matchFaction(tokens, i, factions) != null) return true;
         }
         if (botNames != null && !botNames.isEmpty() && !tokens.isEmpty()) {

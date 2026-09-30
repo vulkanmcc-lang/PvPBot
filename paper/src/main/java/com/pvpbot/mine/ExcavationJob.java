@@ -41,6 +41,9 @@ public final class ExcavationJob {
         // along it (dug front to back).
         int lane = -1;
         int seq;
+        // Not before this server tick (a cell that can't be reached yet -
+        // e.g. under water until the crew has dug a dry way to it).
+        int retryAt;
 
         Cell(int x, int y, int z) {
             this.x = x;
@@ -66,6 +69,7 @@ public final class ExcavationJob {
 
     private static final int LEASE_TICKS = 600;
     private static final int MAX_CELL_FAILURES = 3;
+    private static final int MAX_CELL_DEFERS = 8;
     private static final long MAX_DURATION_MS = 20L * 60L * 1000L;
     private static final int BLAST_SPACING = 5;
 
@@ -79,6 +83,10 @@ public final class ExcavationJob {
     private final List<BlastPoint> blasts = new ArrayList<>();
     private final long deadline;
     private final java.util.Set<UUID> crew = new java.util.HashSet<>();
+    // Blocks bots placed to hold water back (dive shaft caps, plugs over a
+    // cell that had water next to it). Never dug out again, or the water
+    // they hold back floods the dig.
+    private final java.util.Set<Long> sealed = new java.util.HashSet<>();
 
     private int topY;
     private int lastTick = Integer.MIN_VALUE;
@@ -226,6 +234,7 @@ public final class ExcavationJob {
         Cell best = null;
         for (Cell c : cells) {
             if (c.lane != lane || c.done || c.owner != null) continue;
+            if (c.retryAt > Bukkit.getCurrentTick()) continue;
             Block b = world.getBlockAt(c.x, c.y, c.z);
             if (!breakable(b.getType())) {
                 c.done = true; // already open (cave, air) - walk through
@@ -321,11 +330,13 @@ public final class ExcavationJob {
         if (isFinished()) return null;
         if (mode == Mode.TUNNEL) return claimInLane(bot, botPlayer, canBreak);
         Location at = botPlayer.getLocation();
+        int now = Bukkit.getCurrentTick();
         Cell best = null;
         double bestD = Double.MAX_VALUE;
         for (Cell c : cells) {
             if (c.done || c.owner != null) continue;
             if (c.y < topY - 1) break; // sorted top-down: nothing claimable below
+            if (c.retryAt > now) continue;
             Block b = world.getBlockAt(c.x, c.y, c.z);
             if (!breakable(b.getType())) {
                 c.done = true;
@@ -438,6 +449,33 @@ public final class ExcavationJob {
 
     public void release(Cell c) {
         if (c != null && !c.done) c.owner = null;
+    }
+
+    // Can't be done yet but may be later (no dry spot to stand on until the
+    // dig reaches it): hand it back and don't offer it again for a while.
+    // Still gives up on it eventually so the job always ends.
+    public void defer(Cell c, int ticks) {
+        if (c == null || c.done) return;
+        c.owner = null;
+        c.retryAt = Bukkit.getCurrentTick() + ticks;
+        if (++c.failures >= MAX_CELL_DEFERS) c.done = true;
+    }
+
+    public void markSealed(int x, int y, int z) {
+        sealed.add(key(x, y, z));
+        Cell c = byPos.get(key(x, y, z));
+        if (c != null && !c.done) {
+            c.done = true;
+            c.owner = null;
+        }
+    }
+
+    public boolean isSealed(int x, int y, int z) {
+        return sealed.contains(key(x, y, z));
+    }
+
+    public boolean isCell(int x, int y, int z) {
+        return byPos.containsKey(key(x, y, z));
     }
 
     public boolean contains(int x, int y, int z) {

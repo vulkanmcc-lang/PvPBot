@@ -15,9 +15,14 @@ public class MaceController {
 
     private static final float MIN_SMASH_FALL = 1.6f;
 
-    private static final float SMASH_CHARGE = 0.92f;
+    // The smash bonus comes from the fall, not the swing charge (vanilla adds
+    // the mace's fall damage on top of the charge-scaled base), and the
+    // charge restarts the moment the mace is pulled out mid-launch. Waiting
+    // for a full bar meant sailing past the target - swing as soon as the
+    // base hit is worth something.
+    private static final float SMASH_CHARGE = 0.30f;
 
-    private static final float SALVAGE_CHARGE = 0.55f;
+    private static final float SALVAGE_CHARGE = 0.0f;
 
     private static final int ATTEMPT_TIMEOUT = 80;
 
@@ -27,9 +32,11 @@ public class MaceController {
 
     private static final int MAX_CHAIN_HITS = 4;
 
-    private static final int SMASH_COOLDOWN = 100;
-    private static final int ABORT_COOLDOWN = 40;
-    private static final int STUN_SLAM_COOLDOWN = 80;
+    // Wind charges recharge in half a second: good players are back in the
+    // air right after landing.
+    private static final int SMASH_COOLDOWN = 26;
+    private static final int ABORT_COOLDOWN = 14;
+    private static final int STUN_SLAM_COOLDOWN = 44;
 
     private static final int STUN_SLAM_PHASE_DURATION = 70;
 
@@ -48,7 +55,15 @@ public class MaceController {
     private static final double ELYTRA_MIN_RANGE = 10.0;
     private static final double ELYTRA_MAX_RANGE = 40.0;
 
-    private static final double OPPORTUNITY_CHANCE = 0.12;
+    // Per-tick chance to take an open launch (a clean drop onto the target
+    // is always taken).
+    private static final double OPPORTUNITY_CHANCE = 0.55;
+
+    // Wind charge fired at the ground just behind the bot (away from the
+    // target) instead of straight down: the blast throws it up AND toward
+    // the target, the way players open a mace combo.
+    private static final double WIND_PUSH_MIN_GAP = 2.2;
+    private static final double WIND_PUSH_TILT = 0.42;
 
     private enum Launch { NONE, HEIGHT, WIND_CHARGE, ELYTRA, PEARL }
 
@@ -217,7 +232,9 @@ public class MaceController {
         if (!handle.onGround()) {
             return handle.fallDistance > MIN_SMASH_FALL && distance <= SETUP_RANGE;
         }
-        if (chooseLaunch(botPlayer, handle, distance) == Launch.NONE) return false;
+        Launch launch = chooseLaunch(botPlayer, handle, distance);
+        if (launch == Launch.NONE) return false;
+        if (launch == Launch.HEIGHT) return true;
 
         return ThreadLocalRandom.current().nextDouble() < OPPORTUNITY_CHANCE;
     }
@@ -272,8 +289,9 @@ public class MaceController {
 
 
         equipMace(botPlayer);
-        context.suppressSprint = true;
-        handle.setSprinting(false);
+        // Keep the sprint: sprinting in the air steers ~30% harder, which is
+        // what gets the bot on top of a moving target.
+        context.suppressSprint = false;
         aimAtTarget(handle);
         steerToTarget(handle);
 
@@ -335,7 +353,24 @@ public class MaceController {
         botPlayer.getInventory().setHeldItemSlot(slot);
         context.packetBroadcaster.broadcastEquipment();
 
-        context.requestLook(handle.getYRot(), 90.0f, BotAIContext.LOOK_CRITICAL, true);
+        // Straight down, or tilted back from the target so the blast also
+        // carries the bot toward them.
+        Vector shot = new Vector(0, -1, 0);
+        Player target = context.target;
+        if (target != null && target.getWorld() == botPlayer.getWorld()) {
+            double gx = target.getLocation().getX() - handle.getX();
+            double gz = target.getLocation().getZ() - handle.getZ();
+            double gap = Math.hypot(gx, gz);
+            if (gap > WIND_PUSH_MIN_GAP) {
+                double tilt = WIND_PUSH_TILT * Math.min(1.0, (gap - WIND_PUSH_MIN_GAP) / 2.5 + 0.35);
+                shot = new Vector(-gx / gap * tilt, -1, -gz / gap * tilt);
+            }
+        }
+        shot.normalize();
+        float shotPitch = (float) Math.toDegrees(Math.asin(-shot.getY()));
+        float shotYaw = shot.getX() == 0 && shot.getZ() == 0 ? handle.getYRot()
+                : (float) Math.toDegrees(Math.atan2(-shot.getX(), shot.getZ()));
+        context.requestLook(shotYaw, shotPitch, BotAIContext.LOOK_CRITICAL, true);
         context.movementController.flushLook(handle);
         context.packetBroadcaster.broadcastRotation(handle);
 
@@ -343,7 +378,7 @@ public class MaceController {
         context.packetBroadcaster.broadcastAnimation(handle, 0);
 
         try {
-            botPlayer.launchProjectile(org.bukkit.entity.WindCharge.class);
+            botPlayer.launchProjectile(org.bukkit.entity.WindCharge.class, shot.multiply(1.5));
         } catch (Throwable t) {
             return false;
         }
@@ -612,7 +647,14 @@ public class MaceController {
         handle.setSprinting(false);
         context.suppressSprint = true;
 
-        if (!context.combatController.performAttack(botPlayer, false)) return;
+        boolean hit;
+        context.ignoreSwingCharge = true;
+        try {
+            hit = context.combatController.performAttack(botPlayer, false);
+        } finally {
+            context.ignoreSwingCharge = false;
+        }
+        if (!hit) return;
 
         finish(botPlayer);
     }
@@ -1023,7 +1065,7 @@ public class MaceController {
         context.maceWindupTicks = 0;
         context.maceWindupDelay = 0;
         context.maceWindupCooldown = SMASH_COOLDOWN;
-        context.maceHoldAfterAttack = 10;
+        context.maceHoldAfterAttack = 4;
     }
 
     private boolean tryStartChain(Player botPlayer) {

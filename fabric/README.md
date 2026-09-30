@@ -21,11 +21,11 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 |---|---|
 | Attack | everyone kill *name* *(one of your own bots: it's kicked from the faction first so the rest fight it)* · focus *name* · take out *name* · all on *name* · *name* is our target · don't let *name* escape · everyone kill him *(whoever you're looking at)* · kill the closest guy · red team attack blue |
 | Rush | push them · rush them now |
-| Stand down (20 s, works with or without factions) | guys stop fighting · hold your fire · everyone chill · nobody fight · calm down guys |
+| Stand down (until you order an attack again - kill / rush / bow / pillar to / weapons free) | guys stop fighting · hold your fire · everyone chill · nobody fight · calm down guys |
 | Come | come to me · get over here · everyone regroup · stay together · don't split up |
 | Follow (60 s) | follow me · stay with me · follow me in |
 | Push forward | push forward · move up · let's go · go go go |
-| Hold position | wait here |
+| Stay | everyone stay here · stay put · hold your position · don't move *(each bot keeps its spot - fights anyone who comes close, walks back - until the next order)* |
 | Alert | watch out · behind you · they're coming · get ready |
 | Formation | everyone go behind me · get behind me · fall in *(grid behind you, follows you until:)* break formation · at ease |
 | Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)* |
@@ -33,12 +33,22 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Stop mining | everyone stop mining · stop digging · stop destroying |
 | Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight; bots take different routes)* |
 | Bow | everyone bow *name* · shoot *name* · use your bows on *name* *(bots with a bow + arrows keep range and shoot; the rest go melee)* |
-| Armor | everyone put your armor on · gear up · everyone take your armor off |
+| Armor | everyone put your armor on · gear up · everyone take your armor off · everyone put your best armor on · everyone put your bad / worst armor on *(swaps every slot to the strongest / weakest piece they carry)* |
 | Tunnel | everyone tunnel this way *(each bot digs its own 32-long tunnel the way you face - side by side, some level, some ramping up, some down)* |
 | Build up | everyone build up · pillar up *(10 blocks up, every bot on its own column)* |
 | Path | everyone make a path there · build a bridge there *(covered 3-wide bridge with rails and a roof to the block you look at, up to 64 long; the bots share the work)* · stop building |
 | Look | everyone look at me |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
+| Commander | commander kill *name* *(the commander walks up to you, nods, then goes for them)* · commander come here · red commander kill *name*. Pick one with `/pvpbot faction commander <faction> <bot>` |
+
+Every new order replaces the last one: bots drop whatever they were doing
+(digging, building, holding a spot, following, a climb, a bow duel) and do the
+new thing. Armor, "look at me" and "weapons free" are the exceptions - they
+don't interrupt anything.
+
+Mining near water: bots plug water beside or above a block before breaking
+it, and a bot that ends up in water over the dig sinks to the bottom, digs 3
+down, caps the hole above its head and keeps mining underneath.
 
 Names don't have to be pronounceable: `NexarVo1d` works as "nexar void" (or
 just "nexar"), `Steve123` as "steve", `xDarkKnightx` as "dark knight",

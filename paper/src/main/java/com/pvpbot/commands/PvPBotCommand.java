@@ -1377,6 +1377,44 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 sender.sendMessage("§aAdded §e" + count + "§a bots within " + radius + " blocks to §e" + factionName.toLowerCase());
             }
             case "leader" -> handleLeaderCommand(sender, args, botManager);
+            case "commander" -> {
+                if (args.length < 3) {
+                    sender.sendMessage("§cUsage: §f/pvpbot faction commander <faction> <bot|clear>");
+                    sender.sendMessage("§8  The commander answers to §7\"commander ...\"§8 by voice - \"commander kill Steve\"");
+                    sender.sendMessage("§8  makes it walk up to the leader, nod, and go for Steve.");
+                    return;
+                }
+                String factionName = args[2];
+                if (!botManager.factionExists(factionName)) {
+                    unknownFaction(sender, botManager, factionName);
+                    return;
+                }
+                if (args.length < 4) {
+                    java.util.UUID current = botManager.getFactionCommander(factionName);
+                    PvPBot cb = current == null ? null : botManager.getBots().get(current);
+                    sender.sendMessage(current == null
+                            ? "§7" + factionName.toLowerCase() + " has no commander."
+                            : "§7Commander of §e" + factionName.toLowerCase() + "§7: §f"
+                            + (cb != null ? org.bukkit.ChatColor.stripColor(cb.getName()) : current.toString()));
+                    return;
+                }
+                if (args[3].equalsIgnoreCase("clear") || args[3].equalsIgnoreCase("none")
+                        || args[3].equalsIgnoreCase("remove")) {
+                    boolean had = botManager.clearFactionCommander(factionName);
+                    sender.sendMessage(had ? "§a" + factionName.toLowerCase() + " no longer has a commander."
+                            : "§7" + factionName.toLowerCase() + " had no commander.");
+                    return;
+                }
+                PvPBot cmdBot = botManager.getBotByName(args[3]);
+                if (cmdBot == null) {
+                    sender.sendMessage("§cNo bot called §f" + args[3] + "§c.");
+                    return;
+                }
+                botManager.setFactionCommander(factionName, cmdBot.getUUID());
+                sender.sendMessage("§e" + org.bukkit.ChatColor.stripColor(cmdBot.getName())
+                        + "§a is now the commander of §e" + factionName.toLowerCase()
+                        + "§a. Say §f\"commander kill <player>\"§a to send them.");
+            }
             case "givekit" -> applyKitToFaction(sender, args, botManager);
             case "giverandomkit", "randomkit" -> applyRandomKitsToFaction(sender, args, botManager);
             case "formation" -> {
@@ -1414,6 +1452,16 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                     }
                     sender.sendMessage("§a" + count + "§7 bot(s) of §e" + factionName.toLowerCase()
                             + "§7 are putting on their armor.");
+                } else if (armorAction.equals("best") || armorAction.equals("worst")) {
+                    boolean best = armorAction.equals("best");
+                    int count = 0;
+                    for (PvPBot b : botManager.getFactionBots(factionName)) {
+                        if (botManager.equipRankedArmorDelayed(b, best)) count++;
+                    }
+                    sender.sendMessage(count == 0
+                            ? "§7Nobody in §e" + factionName.toLowerCase() + "§7 has anything to swap."
+                            : "§a" + count + "§7 bot(s) of §e" + factionName.toLowerCase()
+                            + "§7 are putting on their " + armorAction + " armor.");
                 } else if (armorAction.equals("off")) {
                     int count = botManager.removeFactionArmorDelayed(factionName);
                     if (count == 0) {
@@ -1424,7 +1472,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                     sender.sendMessage("§a" + count + "§7 bot(s) of §e" + factionName.toLowerCase()
                             + "§7 are taking off their armor.");
                 } else {
-                    sender.sendMessage("§cUsage: §f/pvpbot faction armor <on|off> <faction>");
+                    sender.sendMessage("§cUsage: §f/pvpbot faction armor <on|off|best|worst> <faction>");
                 }
             }
             case "stopattack", "standdown", "holdfire" -> {
@@ -2934,6 +2982,10 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         player.sendMessage("§7work: §f" + ctx.excavationController.status()
                 + " §7reach: §f" + ctx.reachController.status()
                 + " §7bow: §f" + ctx.archerController.status());
+        player.sendMessage("§7orders: §f" + (ctx.holdFire ? "§eweapons down " : "")
+                + (ctx.voiceHold ? "§bholding " : "")
+                + (ctx.commanderPhase != 0 ? "§dcommander run " + ctx.commanderPhase + " " : "")
+                + "§7commander of faction: §f" + plugin.getBotManager().isCommander(ctx.bot.getUUID()));
 
         for (org.bukkit.potion.PotionEffect e : bp.getActivePotionEffects()) {
             if (e.getType().equals(org.bukkit.potion.PotionEffectType.SLOWNESS)) {
@@ -3304,8 +3356,8 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 case "settings" -> { }
                 case "faction" -> {
                     completions.addAll(List.of("list", "info", "create", "remove", "add", "addall", "addnear",
-                            "givekit", "giverandomkit", "formation", "group", "leader", "alliance", "stopattack",
-                            "armor", "moveto", "attack", "minearea"));
+                            "givekit", "giverandomkit", "formation", "group", "leader", "commander", "alliance",
+                            "stopattack", "armor", "moveto", "attack", "minearea"));
                     completions.addAll(mgr.getFactionNames());
                 }
                 case "kit" -> completions.addAll(List.of("create", "remove", "give"));
@@ -3352,7 +3404,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             }
 
             if (baseCmd.equals("faction") && secondArg.equals("armor")) {
-                completions.addAll(List.of("on", "off"));
+                completions.addAll(List.of("on", "off", "best", "worst"));
             }
 
             if (baseCmd.equals("guard")) {
@@ -3418,7 +3470,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                     case "leader" -> completions.addAll(List.of("add", "remove", "list"));
                     case "addnear" -> completions.addAll(List.of("5", "10", "20"));
                     case "info", "members", "remove", "delete", "disband", "add", "addall", "givekit",
-                            "stopattack", "standdown", "holdfire" ->
+                            "stopattack", "standdown", "holdfire", "commander" ->
                             completions.addAll(mgr.getFactionNames());
                     case "group" -> {
                         GroupProvider provider = Bukkit.getServicesManager().load(GroupProvider.class);
@@ -3480,9 +3532,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 }
 
                 else if (secondArg.equals("armor")) {
-                    if (args[2].equalsIgnoreCase("off")) {
-                        completions.addAll(mgr.getFactionNames());
-                    }
+                    completions.addAll(mgr.getFactionNames());
                 }
 
                 else if (secondArg.equals("group")) {
@@ -3496,6 +3546,13 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 else if (secondArg.equals("stopattack") || secondArg.equals("standdown")
                         || secondArg.equals("holdfire")) {
                     completions.addAll(List.of("true", "false"));
+                }
+
+                else if (secondArg.equals("commander")) {
+                    completions.add("clear");
+                    for (PvPBot bot : mgr.getFactionBots(args[2])) {
+                        completions.add(org.bukkit.ChatColor.stripColor(bot.getName()));
+                    }
                 }
 
                 else if (secondArg.equals("leader")) {

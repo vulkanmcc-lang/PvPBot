@@ -242,6 +242,11 @@ public class BotAI {
         if (context.pearlCooldown > 0) context.pearlCooldown--;
         if (context.regroupTicks > 0) context.regroupTicks--;
 
+        if (context.commanderController.handle(botPlayer)) {
+            finishTick(handle);
+            return;
+        }
+
         if (context.formationSlot != null) {
             context.target = null;
             if (context.movementController.handleFormationMarch()) {

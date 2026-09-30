@@ -599,6 +599,7 @@ public class PvPBot {
         BotAIContext ctx = ai.getContext();
         ctx.guardMode = mode;
         ctx.guardAnchor = anchor.clone();
+        ctx.voiceHold = false;
         ctx.guardRadius = Math.max(2.0, radius);
 
         ctx.guardLeash = ctx.guardRadius + Math.min(12.0, Math.max(4.0, ctx.guardRadius * 0.5));
@@ -616,6 +617,7 @@ public class PvPBot {
         ctx.guardAnchor = null;
         ctx.guardReturning = false;
         ctx.guardMode = BotAIContext.GuardMode.POST;
+        ctx.voiceHold = false;
     }
 
     public BotAIContext.GuardMode getGuardMode() {
@@ -668,6 +670,7 @@ public class PvPBot {
                 ai.getContext().excavationController.abort();
                 ai.getContext().reachController.stop();
                 ai.getContext().archerController.stop();
+                ai.getContext().commanderController.stop();
             }
         } catch (Throwable ignored) {
         }

@@ -79,7 +79,6 @@ public class ReachController {
         Player self = context.bot.getBukkitPlayer();
         int baseY = self != null ? self.getLocation().getBlockY() : 64;
         towerTopY = baseY + height;
-        context.standDownTicks = 0;
         context.movementController.clearFormationOrder();
         context.currentPath.clear();
         context.pathNodeIndex = 0;
@@ -125,7 +124,7 @@ public class ReachController {
         stop();
         targetId = target.getUniqueId();
         targetWorld = target.getWorld();
-        context.standDownTicks = 0;
+        context.releaseStandDown();
         context.movementController.clearFormationOrder();
         context.currentPath.clear();
         context.pathNodeIndex = 0;

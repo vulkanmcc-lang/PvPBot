@@ -196,7 +196,7 @@ public class PatrolController {
     private Player spotEnemy(Player botPlayer, ServerPlayer handle) {
         if (!context.settings.isPatrolEngage()) return null;
 
-        if (!context.settings.isHostile() || context.standDownTicks > 0) return null;
+        if (!context.settings.isHostile() || context.isStandingDown()) return null;
 
         com.pvpbot.BotManager factionMgr = com.pvpbot.PvPBotPlugin.getInstance().getBotManager();
         if (factionMgr != null) {

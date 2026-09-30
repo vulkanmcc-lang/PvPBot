@@ -241,6 +241,32 @@ public class BotAIContext {
     // out. Per bot, so it works with or without factions.
     public int standDownTicks = 0;
 
+    // Voice "stop fighting": weapons down until told to fight again (an
+    // attack / engage order) - no timer.
+    public boolean holdFire = false;
+
+    public boolean isStandingDown() {
+        return holdFire || standDownTicks > 0;
+    }
+
+    public void releaseStandDown() {
+        holdFire = false;
+        standDownTicks = 0;
+    }
+
+    // Voice "stay here": the guard post was set by a voice order (so the
+    // next voice order may lift it; a /pvpbot guard post is left alone).
+    public boolean voiceHold = false;
+
+    // Keep sinking in water instead of swimming up (excavation dive).
+    public int waterSinkTicks = 0;
+
+    // Commander order: walk to the speaker, nod, then go for the target.
+    public java.util.UUID commanderSpeaker = null;
+    public Player commanderVictim = null;
+    public int commanderPhase = 0;      // 0 none, 1 approach, 2 nod
+    public int commanderPhaseTicks = 0;
+
     // Jumps refused because a block sits right above the head (a jump there
     // only bonks - it can't climb a step). Enough of them in a row and the
     // spot ahead is treated as a dead end.
@@ -250,6 +276,8 @@ public class BotAIContext {
     // `ticks` (voice "stand down").
     public void standDown(int ticks) {
         standDownTicks = Math.max(standDownTicks, ticks);
+        commanderPhase = 0;
+        commanderVictim = null;
         forcedTarget = null;
         target = null;
         assistTarget = null;
@@ -593,6 +621,7 @@ public class BotAIContext {
     public ExcavationController excavationController;
     public ReachController reachController;
     public ArcherController archerController;
+    public CommanderController commanderController;
     public TechniqueController techniqueController;
     public CartController cartController;
     public TunnelController tunnelController;
@@ -653,6 +682,7 @@ public class BotAIContext {
         if (excavationController != null && excavationController.isActive()) return false;
         if (reachController != null && reachController.isActive()) return false;
         if (archerController != null && archerController.isActive()) return false;
+        if (commanderController != null && commanderController.isActive()) return false;
         if (farmController != null && farmController.isActive()) return false;
         if (deliveryController != null && deliveryController.isActive()) return false;
         if (patrolController != null && patrolController.isActive()) return false;
@@ -683,6 +713,7 @@ public class BotAIContext {
         this.excavationController = new ExcavationController(this);
         this.reachController = new ReachController(this);
         this.archerController = new ArcherController(this);
+        this.commanderController = new CommanderController(this);
         this.techniqueController = new TechniqueController(this);
         this.cartController = new CartController(this);
         this.tunnelController = new TunnelController(this);

@@ -305,6 +305,16 @@ public class MovementController {
             return 0f;
         }
 
+        if (context.waterSinkTicks > 0) {
+            // Excavation dive: let the bot sink to the bottom (and stay there
+            // while it digs) instead of paddling back up.
+            context.waterSinkTicks--;
+            context.waterExitTicks = 0;
+            context.shouldJumpThisTick = false;
+            handle.setSwimming(false);
+            return handle.onGround() ? 0f : -1.0f;
+        }
+
         boolean headUnder = handle.isUnderWater();
         boolean wantsUp = false;
 

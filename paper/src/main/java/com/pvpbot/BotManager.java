@@ -50,6 +50,8 @@ public class BotManager {
     private final Map<String, String> allianceOf = new HashMap<>();
 
     private final Map<String, UUID> factionLeaders = new HashMap<>();
+    // One bot per faction the leader can address as "commander" by voice.
+    private final Map<String, UUID> factionCommanders = new HashMap<>();
 
     public record FormationOrder(FormationManager.Shape shape, double spacing) {}
 
@@ -142,6 +144,143 @@ public class BotManager {
         if (!armorTaskInProgress.add(bot.getUUID())) return false;
         scheduleArmorRemove(bot);
         return true;
+    }
+
+    // "put your best / worst armor on": for every slot, wear the strongest (or
+    // weakest) piece the bot owns - worn or in its inventory - swapping the
+    // current piece back into the inventory. One piece at a time, with the
+    // equip sounds, like the plain armor on/off.
+    public boolean equipRankedArmorDelayed(PvPBot bot, boolean best) {
+        if (bot == null || !bot.isAlive() || bot.getBukkitPlayer() == null) return false;
+        org.bukkit.entity.Player player = bot.getBukkitPlayer();
+        org.bukkit.inventory.PlayerInventory inv = player.getInventory();
+
+        java.util.List<ArmorKind> kinds = new java.util.ArrayList<>();
+        for (ArmorKind kind : new ArmorKind[]{ArmorKind.HELMET, ArmorKind.CHESTPLATE, ArmorKind.LEGGINGS, ArmorKind.BOOTS}) {
+            ItemStack worn = wornPiece(inv, kind);
+            // An elytra in the chest slot is flight gear (mace dives) - leave it.
+            if (worn != null && worn.getType() == org.bukkit.Material.ELYTRA) continue;
+            int pick = pickRankedPiece(inv, kind, best);
+            if (pick < 0) continue;
+            double pickScore = armorScore(inv.getItem(pick));
+            boolean wornUsable = worn != null && !worn.getType().isAir();
+            if (wornUsable) {
+                double wornScore = armorScore(worn);
+                if (best ? pickScore <= wornScore : pickScore >= wornScore) continue;
+            }
+            kinds.add(kind);
+        }
+        if (kinds.isEmpty()) return false;
+        if (!armorTaskInProgress.add(bot.getUUID())) return false;
+
+        java.util.Collections.shuffle(kinds);
+        final int[] index = {0};
+        final UUID botUuid = bot.getUUID();
+        org.bukkit.Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
+            @Override
+            public void run() {
+                Player p = bot.getBukkitPlayer();
+                if (!bot.isAlive() || p == null || p.isDead() || index[0] >= kinds.size()) {
+                    armorTaskInProgress.remove(botUuid);
+                    return;
+                }
+                ArmorKind kind = kinds.get(index[0]++);
+                org.bukkit.inventory.PlayerInventory pinv = p.getInventory();
+                int pick = pickRankedPiece(pinv, kind, best);
+                ItemStack wornNow = wornPiece(pinv, kind);
+                if (pick >= 0 && (wornNow == null || wornNow.getType() != org.bukkit.Material.ELYTRA)) {
+                    ItemStack chosen = pinv.getItem(pick).clone();
+                    ItemStack worn = wornNow;
+                    boolean keepWorn = worn != null && !worn.getType().isAir();
+                    double chosenScore = armorScore(chosen);
+                    boolean better = !keepWorn
+                            || (best ? chosenScore > armorScore(worn) : chosenScore < armorScore(worn));
+                    if (better) {
+                        ItemStack single = chosen.clone();
+                        single.setAmount(1);
+                        if (chosen.getAmount() > 1) {
+                            chosen.setAmount(chosen.getAmount() - 1);
+                            pinv.setItem(pick, chosen);
+                        } else {
+                            pinv.setItem(pick, keepWorn ? worn.clone() : null);
+                            keepWorn = false;
+                        }
+                        equipToArmorSlot(pinv, kind, single);
+                        if (keepWorn) {
+                            java.util.Map<Integer, ItemStack> left = pinv.addItem(worn.clone());
+                            for (ItemStack l : left.values()) p.getWorld().dropItemNaturally(p.getLocation(), l);
+                        }
+                        playArmorEquipSound(p, kind, single);
+                        bot.broadcastEquipment();
+                    }
+                }
+                if (index[0] < kinds.size()) {
+                    org.bukkit.Bukkit.getScheduler().runTaskLater(plugin, this,
+                            java.util.concurrent.ThreadLocalRandom.current().nextLong(8L, 26L));
+                } else {
+                    armorTaskInProgress.remove(botUuid);
+                }
+            }
+        }, java.util.concurrent.ThreadLocalRandom.current().nextLong(5L, 21L));
+        return true;
+    }
+
+    private static ItemStack wornPiece(org.bukkit.inventory.PlayerInventory inv, ArmorKind kind) {
+        return switch (kind) {
+            case HELMET -> inv.getHelmet();
+            case CHESTPLATE -> inv.getChestplate();
+            case LEGGINGS -> inv.getLeggings();
+            case BOOTS -> inv.getBoots();
+            default -> null;
+        };
+    }
+
+    // Storage slot of the best (or worst) piece for `kind`; elytras don't
+    // count as armor here.
+    private int pickRankedPiece(org.bukkit.inventory.PlayerInventory inv, ArmorKind kind, boolean best) {
+        int pick = -1;
+        double pickScore = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null || it.getType().isAir()) continue;
+            if (it.getType() == org.bukkit.Material.ELYTRA) continue;
+            if (!matchesArmorKind(it.getType(), kind)) continue;
+            double sc = armorScore(it);
+            if (pick < 0 || (best ? sc > pickScore : sc < pickScore)) {
+                pick = i;
+                pickScore = sc;
+            }
+        }
+        return pick;
+    }
+
+    // Rough protection value: material tier first, then Protection-type
+    // enchants, then how worn it is.
+    static double armorScore(ItemStack it) {
+        if (it == null || it.getType().isAir()) return 0;
+        String n = it.getType().name();
+        double tier;
+        if (n.startsWith("NETHERITE")) tier = 7;
+        else if (n.startsWith("DIAMOND")) tier = 6;
+        else if (n.startsWith("IRON")) tier = 5;
+        else if (n.equals("TURTLE_HELMET")) tier = 4.5;
+        else if (n.startsWith("CHAINMAIL")) tier = 4;
+        else if (n.startsWith("GOLDEN")) tier = 3;
+        else if (n.startsWith("COPPER")) tier = 3.5;
+        else if (n.startsWith("LEATHER")) tier = 2;
+        else tier = 1;
+        double score = tier * 10;
+        var ench = it.getEnchantments();
+        for (var e : ench.entrySet()) {
+            String key = e.getKey().getKey().getKey();
+            if (key.equals("protection")) score += e.getValue() * 2.0;
+            else if (key.contains("protection")) score += e.getValue();
+            else if (key.equals("unbreaking") || key.equals("mending")) score += 0.3 * e.getValue();
+        }
+        if (it.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable d && it.getType().getMaxDurability() > 0) {
+            score -= 2.0 * d.getDamage() / it.getType().getMaxDurability();
+        }
+        return score;
     }
 
     private void scheduleArmorEquip(PvPBot bot) {
@@ -451,6 +590,7 @@ public class BotManager {
         Set<UUID> members = factions.remove(key);
         if (members != null) members.forEach(factionOf::remove);
         factionLeaders.remove(key);
+        factionCommanders.remove(key);
         factionFormations.remove(key);
         factionStopAttack.remove(key);
         saveFactionsToConfig();
@@ -470,6 +610,7 @@ public class BotManager {
 
             if (!previous.equals(key)) {
                 factionLeaders.remove(previous, playerUUID);
+                factionCommanders.remove(previous, playerUUID);
                 removeFromGroup(playerUUID);
             }
         }
@@ -500,6 +641,11 @@ public class BotManager {
             UUID leader = factionLeaders.get(factionName);
             if (leader != null) {
                 config.set("factions." + factionName + ".leader", leader.toString());
+            }
+
+            UUID commander = factionCommanders.get(factionName);
+            if (commander != null) {
+                config.set("factions." + factionName + ".commander", commander.toString());
             }
 
             FormationOrder formation = factionFormations.get(factionName);
@@ -537,6 +683,7 @@ public class BotManager {
         factions.clear();
         factionOf.clear();
         factionLeaders.clear();
+        factionCommanders.clear();
         factionFormations.clear();
         factionStopAttack.clear();
         alliances.clear();
@@ -614,6 +761,14 @@ public class BotManager {
                 }
             }
 
+            String commanderStr = plugin.getConfig().getString("factions." + factionName + ".commander");
+            if (commanderStr != null) {
+                try {
+                    factionCommanders.put(key, UUID.fromString(commanderStr));
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+
             String shapeStr = plugin.getConfig().getString("factions." + factionName + ".formation.shape");
             double spacing = plugin.getConfig().getDouble("factions." + factionName + ".formation.spacing", 0.0);
             if (shapeStr != null) {
@@ -636,6 +791,7 @@ public class BotManager {
             Set<UUID> members = factions.get(key);
             if (members != null) members.remove(uuid);
             factionLeaders.remove(key, uuid);
+            factionCommanders.remove(key, uuid);
         }
         removeFromGroup(uuid);
     }
@@ -752,6 +908,29 @@ public class BotManager {
 
     public UUID getFactionLeader(String factionName) {
         return factionLeaders.get(normalize(factionName));
+    }
+
+    // The commander must be a member of the faction (joins it if not).
+    public void setFactionCommander(String factionName, UUID bot) {
+        String key = normalize(factionName);
+        if (!key.equals(factionOf.get(bot))) addPlayerToFaction(factionName, bot);
+        factionCommanders.put(key, bot);
+        saveFactionsToConfig();
+    }
+
+    public boolean clearFactionCommander(String factionName) {
+        boolean had = factionCommanders.remove(normalize(factionName)) != null;
+        if (had) saveFactionsToConfig();
+        return had;
+    }
+
+    public UUID getFactionCommander(String factionName) {
+        return factionCommanders.get(normalize(factionName));
+    }
+
+    public boolean isCommander(UUID uuid) {
+        String f = factionOf.get(uuid);
+        return f != null && uuid.equals(factionCommanders.get(f));
     }
 
     public UUID getLeaderFor(UUID member) {

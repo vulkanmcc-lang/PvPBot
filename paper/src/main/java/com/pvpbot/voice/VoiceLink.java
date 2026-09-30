@@ -61,13 +61,25 @@ public final class VoiceLink implements PluginMessageListener, Listener {
     private static final double ALERT_RANGE = 24.0;
     private static final double ADVANCE_DISTANCE = 16.0;
     private static final int MOVE_TICKS = 12000;
-    private static final int WAIT_TICKS = 1200;
-    private static final int STAND_DOWN_TICKS = 20 * 20;
+    private static final double HOLD_RADIUS = 5.0;
     private static final int FOLLOW_TICKS = 20 * 60;
 
     private final PvPBotPlugin plugin;
     private final Map<UUID, Long> lastCommand = new HashMap<>();
-    private final Map<UUID, BukkitTask> followTasks = new HashMap<>();
+
+    // Running "follow me" / "look at me" orders. A bot given a new order is
+    // taken out of whichever of these it was in; the rest carry on.
+    private static final class Crewed {
+        final List<PvPBot> crew;
+        BukkitTask task;
+
+        Crewed(List<PvPBot> crew) {
+            this.crew = crew;
+        }
+    }
+
+    private final Map<UUID, List<Crewed>> followTasks = new HashMap<>();
+    private final List<Crewed> lookTasks = new ArrayList<>();
 
     private VoiceLink(PvPBotPlugin plugin) {
         this.plugin = plugin;
@@ -111,6 +123,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         // open one ("focus Steve").
         Set<String> words = new LinkedHashSet<>();
         for (String f : plugin.getBotManager().getFactionNames()) words.add("@" + f);
+        words.add("@commander");
         words.addAll(VoiceCommandParser.vocabulary());
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(PROTOCOL_VERSION);
@@ -205,51 +218,71 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         lastCommand.put(speaker.getUniqueId(), now);
 
         List<PvPBot> bots = selectBots(manager, speaker, led, order);
-        String who = order.subjectBot() != null ? order.subjectBot()
+        String who = order.commander()
+                ? (order.subjectFaction() == null ? "commander" : order.subjectFaction().toLowerCase() + " commander")
+                : order.subjectBot() != null ? order.subjectBot()
                 : order.subjectFaction() == null ? "everyone" : order.subjectFaction().toLowerCase();
         if (bots.isEmpty()) {
-            fail(speaker, transcript, order.subjectFaction() != null
+            fail(speaker, transcript, order.commander()
+                    ? "no commander - /pvpbot faction commander <faction> <bot>"
+                    : order.subjectFaction() != null
                     ? "you don't lead " + who : "none of your bots are alive");
             return;
         }
         Set<String> factions = factionsOf(manager, bots);
-        // Any new order replaces a climb-to or bow order in progress; an
-        // order to go somewhere or work also ends a patrol, which would
-        // otherwise keep the bot on its route.
-        boolean relocates = switch (order.intent()) {
-            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, PILLAR_TO, BOW -> true;
-            default -> false;
-        };
+
+        // What the bots were busy with, for "stop mining" feedback, before
+        // the new order wipes it.
+        int wasDigging = 0;
+        boolean wasDestroying = false;
         for (PvPBot b : bots) {
-            var ctx = b.getAI().getContext();
-            ctx.reachController.stop();
-            ctx.archerController.stop();
-            if (relocates && ctx.patrolController.isActive()) ctx.patrolController.stop();
+            var ec = b.getAI().getContext().excavationController;
+            if (ec.isActive()) {
+                wasDigging++;
+                if (ec.job() != null && ec.job().mode == com.pvpbot.mine.ExcavationJob.Mode.DESTROY) {
+                    wasDestroying = true;
+                }
+            }
+        }
+
+        // A new order means: drop whatever the last one had you doing and do
+        // this instead. Only orders that sit on top of anything (armor,
+        // "look at me", "weapons free") leave the current task running.
+        boolean interrupts = switch (order.intent()) {
+            case ARMOR_ON, ARMOR_OFF, ARMOR_BEST, ARMOR_WORST, LOOK_AT_ME, ENGAGE -> false;
+            default -> true;
+        };
+        if (interrupts) {
+            for (PvPBot b : bots) interrupt(b);
+            if (order.intent() != Intent.PATH) dropOrphanedVoiceBuild(speaker.getUniqueId(), manager);
         }
         boolean movement = switch (order.intent()) {
             case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, BREAK_FORMATION -> true;
             default -> false;
         };
-        if (movement) {
-            // New job or position: drop the old one.
-            for (PvPBot b : bots) b.getAI().getContext().excavationController.abort();
-            if (order.intent() != Intent.FORMATION && order.subjectBot() == null) {
-                for (String f : factions) manager.breakFactionFormation(f);
-            }
+        if (movement && order.intent() != Intent.FORMATION && order.subjectBot() == null && !order.commander()) {
+            for (String f : factions) manager.breakFactionFormation(f);
         }
 
         switch (order.intent()) {
             case ATTACK -> {
                 releaseStandDown(manager, factions, bots);
-                cancelFollow(speaker.getUniqueId());
                 attack(manager, speaker, transcript, order, bots, who);
             }
             case RUSH -> {
                 releaseStandDown(manager, factions, bots);
-                cancelFollow(speaker.getUniqueId());
                 List<Player> enemies = enemiesNear(manager, speaker, speaker.getLocation(), RUSH_RANGE);
                 if (enemies.isEmpty()) {
                     fail(speaker, transcript, "no enemies nearby");
+                    return;
+                }
+                if (order.commander()) {
+                    for (PvPBot b : bots) {
+                        Player bp = b.getBukkitPlayer();
+                        Player victim = bp == null ? null : nearest(bp.getLocation(), enemies, b.getUUID());
+                        if (victim != null) b.getAI().getContext().commanderController.start(speaker, victim);
+                    }
+                    ok(speaker, transcript, who + " → reporting to you, then rushing in");
                     return;
                 }
                 int sent = spreadOver(bots, enemies);
@@ -257,15 +290,13 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             }
             case STAND_DOWN -> {
                 standDown(bots);
-                ok(speaker, transcript, who + " → standing down for " + (STAND_DOWN_TICKS / 20)
-                        + "s (" + bots.size() + ")");
+                ok(speaker, transcript, who + " → weapons down until you order an attack (" + bots.size() + ")");
             }
             case ENGAGE -> {
                 releaseStandDown(manager, factions, bots);
                 ok(speaker, transcript, who + " → weapons free (" + bots.size() + ")");
             }
             case COME -> {
-                cancelFollow(speaker.getUniqueId());
                 int moved = gatherAt(bots, speaker.getLocation());
                 ok(speaker, transcript, who + " → coming to you (" + moved + ")");
             }
@@ -274,16 +305,21 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 ok(speaker, transcript, who + " → following you (" + bots.size() + ")");
             }
             case WAIT -> {
-                cancelFollow(speaker.getUniqueId());
+                // A post right where each bot stands: it stays there (fights
+                // anyone who comes close, then walks back) until the next
+                // order moves it.
+                int held = 0;
                 for (PvPBot b : bots) {
                     Player bp = b.getBukkitPlayer();
-                    if (bp != null) b.orderToFormationSlot(bp.getLocation(), WAIT_TICKS);
+                    if (bp == null) continue;
+                    b.setGuardPost(bp.getLocation(), HOLD_RADIUS, bp.getLocation().getYaw());
+                    b.getAI().getContext().voiceHold = true;
+                    held++;
                 }
-                ok(speaker, transcript, who + " → holding position (" + bots.size() + ")");
+                ok(speaker, transcript, who + " → staying here until you say otherwise (" + held + ")");
             }
             case ADVANCE -> {
                 releaseStandDown(manager, factions, bots);
-                cancelFollow(speaker.getUniqueId());
                 int moved = gatherAt(bots, aheadOf(speaker, ADVANCE_DISTANCE));
                 ok(speaker, transcript, who + " → pushing forward (" + moved + ")");
             }
@@ -300,7 +336,6 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             }
             case PILLAR_TO, BOW -> {
                 releaseStandDown(manager, factions, bots);
-                cancelFollow(speaker.getUniqueId());
                 Player victim = switch (order.targetKind()) {
                     case NAME -> resolveName(manager, order.target());
                     case LOOK -> lookedAt(speaker);
@@ -351,7 +386,6 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 }
             }
             case PATH -> {
-                cancelFollow(speaker.getUniqueId());
                 org.bukkit.block.Block aim = speaker.getTargetBlockExact(160);
                 if (aim == null) {
                     fail(speaker, transcript, "look at the block the path should go to");
@@ -386,7 +420,6 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         + job.total() + " blocks, " + bots.size() + " builders)");
             }
             case TUNNEL -> {
-                cancelFollow(speaker.getUniqueId());
                 float yaw = speaker.getLocation().getYaw();
                 int dirX = 0, dirZ = 0;
                 // Snap to the nearest compass direction: straight tunnels.
@@ -410,7 +443,6 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         + " tunnels, " + TUNNEL_LENGTH + " long)");
             }
             case BUILD_UP -> {
-                cancelFollow(speaker.getUniqueId());
                 // Give every bot its own column (its current one if nobody
                 // else has it, else the nearest free one) so no two of them
                 // try to place on the same block.
@@ -432,12 +464,16 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             }
             case LOOK_AT_ME -> {
                 UUID id = speaker.getUniqueId();
+                for (PvPBot b : bots) removeFrom(lookTasks, b);
                 List<PvPBot> crew = new ArrayList<>(bots);
+                Crewed look = new Crewed(crew);
+                lookTasks.add(look);
                 final int[] left = {LOOK_TICKS};
-                Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+                look.task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
                     Player p = Bukkit.getPlayer(id);
-                    if (p == null || !p.isOnline() || --left[0] <= 0) {
-                        task.cancel();
+                    if (p == null || !p.isOnline() || --left[0] <= 0 || crew.isEmpty()) {
+                        look.task.cancel();
+                        lookTasks.remove(look);
                         return;
                     }
                     Location eye = p.getEyeLocation();
@@ -469,8 +505,21 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                             + " (" + n + ")");
                 }
             }
+            case ARMOR_BEST, ARMOR_WORST -> {
+                boolean best = order.intent() == Intent.ARMOR_BEST;
+                int n = 0;
+                for (PvPBot b : bots) {
+                    if (manager.equipRankedArmorDelayed(b, best)) n++;
+                }
+                if (n == 0) {
+                    fail(speaker, transcript, best ? "already wearing their best armor"
+                            : "already wearing their worst armor");
+                } else {
+                    ok(speaker, transcript, who + " → putting their " + (best ? "best" : "worst")
+                            + " armor on (" + n + ")");
+                }
+            }
             case FORMATION -> {
-                cancelFollow(speaker.getUniqueId());
                 if (order.subjectBot() != null) {
                     startFollow(speaker, bots, true);
                     ok(speaker, transcript, who + " → staying behind you");
@@ -484,11 +533,9 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         + ") - \"break formation\" to release");
             }
             case BREAK_FORMATION -> {
-                cancelFollow(speaker.getUniqueId());
                 ok(speaker, transcript, who + " → formation broken (" + bots.size() + ")");
             }
             case MINE, DESTROY -> {
-                cancelFollow(speaker.getUniqueId());
                 boolean destroy = order.intent() == Intent.DESTROY;
                 Location center = workCenter(speaker);
                 com.pvpbot.mine.ExcavationJob job = com.pvpbot.mine.ExcavationJob.start(
@@ -520,18 +567,8 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         + size + "×" + size + " area, " + job.total() + " blocks (" + bots.size() + extra + ")");
             }
             case WORK_STOP -> {
-                int stopped = 0;
-                boolean destroying = false;
-                for (PvPBot b : bots) {
-                    var ec = b.getAI().getContext().excavationController;
-                    if (ec.isActive()) {
-                        if (ec.job() != null && ec.job().mode == com.pvpbot.mine.ExcavationJob.Mode.DESTROY) {
-                            destroying = true;
-                        }
-                        ec.abort();
-                        stopped++;
-                    }
-                }
+                int stopped = wasDigging;
+                boolean destroying = wasDestroying;
                 com.pvpbot.mine.ExcavationJob.stop(speaker.getUniqueId());
                 boolean building = stopVoiceBuild(speaker.getUniqueId(), manager);
                 if (building && stopped == 0) {
@@ -558,6 +595,51 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         }
         old.removeScaffoldNow((UUID) null);
         return true;
+    }
+
+    // A voice path nobody is building any more (every builder got a new
+    // order) is called off so its scaffold doesn't sit there.
+    private void dropOrphanedVoiceBuild(UUID speaker, BotManager manager) {
+        com.pvpbot.schem.BuildJob job = plugin.getBuildJobs().get(VOICE_BUILD_PREFIX + speaker);
+        if (job == null) return;
+        for (PvPBot b : manager.getBots().values()) {
+            if (b.getAI().getContext().buildController.currentJob() == job) return;
+        }
+        stopVoiceBuild(speaker, manager);
+    }
+
+    // Clean slate for a new order: every task, walk, hold, follow, look,
+    // commander run and fight the bot had from before is dropped.
+    private void interrupt(PvPBot b) {
+        var ctx = b.getAI().getContext();
+        ctx.reachController.stop();
+        ctx.archerController.stop();
+        ctx.commanderController.stop();
+        ctx.excavationController.abort();
+        if (ctx.patrolController.isActive()) ctx.patrolController.stop();
+        if (ctx.areaMiningController.isActive()) ctx.areaMiningController.abort();
+        if (ctx.miningController.isActive()) ctx.miningController.abort();
+        if (ctx.farmController.isActive()) ctx.farmController.abort();
+        if (ctx.deliveryController.isActive()) ctx.deliveryController.abort();
+        if (ctx.golemFightController.isActive()) ctx.golemFightController.stop();
+        if (ctx.tunnelController.isActive()) ctx.tunnelController.abort();
+        if (ctx.buildController.isBusy() || ctx.buildController.currentJob() != null) ctx.buildController.abort();
+        ctx.movementController.clearFormationOrder();
+        if (ctx.voiceHold) b.clearGuardPost();
+        for (List<Crewed> list : followTasks.values()) removeFrom(list, b);
+        removeFrom(lookTasks, b);
+        b.setForcedTarget(null);
+        ctx.target = null;
+    }
+
+    private static void removeFrom(List<Crewed> list, PvPBot b) {
+        for (java.util.Iterator<Crewed> it = list.iterator(); it.hasNext(); ) {
+            Crewed c = it.next();
+            if (c.crew.remove(b) && c.crew.isEmpty()) {
+                if (c.task != null) c.task.cancel();
+                it.remove();
+            }
+        }
     }
 
     private static final int TUNNEL_LENGTH = 32;
@@ -630,6 +712,16 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     fail(speaker, transcript, order.target() + " has nobody alive to attack");
                     return;
                 }
+                if (order.commander()) {
+                    for (PvPBot b : bots) {
+                        Player bp = b.getBukkitPlayer();
+                        Player victim = bp == null ? null : nearest(bp.getLocation(), enemies, b.getUUID());
+                        if (victim != null) b.getAI().getContext().commanderController.start(speaker, victim);
+                    }
+                    ok(speaker, transcript, who + " → reporting to you, then attacking "
+                            + order.target().toLowerCase());
+                    return;
+                }
                 int sent = spreadOver(bots, enemies);
                 ok(speaker, transcript, who + " → attacking " + order.target().toLowerCase()
                         + " (" + sent + ")");
@@ -673,6 +765,22 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         kickedFrom = vf;
                     }
                 }
+                if (order.commander()) {
+                    int sent = 0;
+                    for (PvPBot b : bots) {
+                        if (b.getUUID().equals(victim.getUniqueId())) continue;
+                        b.getAI().getContext().commanderController.start(speaker, victim);
+                        sent++;
+                    }
+                    if (sent == 0) {
+                        fail(speaker, transcript, "the commander can't attack itself");
+                        return;
+                    }
+                    ok(speaker, transcript, who + " → reporting to you, then going for "
+                            + ChatColor.stripColor(victim.getName())
+                            + (kickedFrom != null ? " - kicked from " + kickedFrom.toLowerCase() : ""));
+                    return;
+                }
                 int sent = 0;
                 for (PvPBot b : bots) {
                     if (b.getUUID().equals(victim.getUniqueId())) continue;
@@ -690,18 +798,21 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         }
     }
 
-    // ---- stand-down: per bot and timed, so it works with or without a
-    // faction and a "chill" never leaves bots passive forever.
+    // ---- stand-down: per bot, so it works with or without a faction. It
+    // lasts until the bots are told to fight again (attack / rush / bow /
+    // pillar-to / "weapons free" / "watch out").
 
     private static void standDown(List<PvPBot> bots) {
         for (PvPBot b : bots) {
             b.setForcedTarget(null);
-            b.getAI().getContext().standDown(STAND_DOWN_TICKS);
+            var ctx = b.getAI().getContext();
+            ctx.standDown(0);
+            ctx.holdFire = true;
         }
     }
 
     private static void releaseStandDown(BotManager manager, Set<String> factions, List<PvPBot> bots) {
-        for (PvPBot b : bots) b.getAI().getContext().standDownTicks = 0;
+        for (PvPBot b : bots) b.getAI().getContext().releaseStandDown();
         // Also lift a manual "/pvpbot faction stopattack" on the factions ordered to fight.
         for (String f : factions) {
             if (manager.isFactionStopAttack(f)) manager.setFactionStopAttack(f, false);
@@ -724,18 +835,20 @@ public final class VoiceLink implements PluginMessageListener, Listener {
     // behind = keep a grid slot behind the speaker until told otherwise
     // (used for one named bot; whole factions use the faction formation).
     private void startFollow(Player speaker, List<PvPBot> bots, boolean behind) {
-        cancelFollow(speaker.getUniqueId());
         UUID id = speaker.getUniqueId();
         List<PvPBot> crew = new ArrayList<>(bots);
+        Crewed follow = new Crewed(crew);
         final Location[] lastAnchor = {null};
         final int[] ticks = {0};
-        BukkitTask task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+        follow.task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             Player p = Bukkit.getPlayer(id);
             ticks[0] += 20;
             crew.removeIf(b -> !b.isAlive());
             if (p == null || !p.isOnline() || p.isDead() || crew.isEmpty()
                     || (!behind && ticks[0] > FOLLOW_TICKS)) {
-                cancelFollow(id);
+                follow.task.cancel();
+                List<Crewed> list = followTasks.get(id);
+                if (list != null) list.remove(follow);
                 return;
             }
             Location here = p.getLocation();
@@ -755,12 +868,13 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 lastAnchor[0] = here;
             }
         }, 0L, 20L);
-        followTasks.put(id, task);
+        followTasks.computeIfAbsent(id, k -> new ArrayList<>()).add(follow);
     }
 
     private void cancelFollow(UUID speaker) {
-        BukkitTask t = followTasks.remove(speaker);
-        if (t != null) t.cancel();
+        List<Crewed> list = followTasks.remove(speaker);
+        if (list == null) return;
+        for (Crewed c : list) if (c.task != null) c.task.cancel();
     }
 
     private static Location aheadOf(Player speaker, double distance) {
@@ -822,6 +936,18 @@ public final class VoiceLink implements PluginMessageListener, Listener {
 
     // Narrow the speaker's bots down to who was addressed.
     private static List<PvPBot> selectBots(BotManager manager, Player speaker, List<PvPBot> led, Parsed order) {
+        if (order.commander()) {
+            // The commander of each faction the speaker leads (or of the
+            // one named: "red team commander ...").
+            List<PvPBot> out = new ArrayList<>();
+            for (PvPBot b : led) {
+                String f = manager.getPlayerFaction(b.getUUID());
+                if (f == null || !b.getUUID().equals(manager.getFactionCommander(f))) continue;
+                if (order.subjectFaction() != null && !f.equalsIgnoreCase(order.subjectFaction())) continue;
+                out.add(b);
+            }
+            return out;
+        }
         if (order.subjectBot() != null) {
             for (PvPBot b : led) {
                 if (ChatColor.stripColor(b.getName()).equals(order.subjectBot())) return List.of(b);

@@ -80,7 +80,7 @@ public class ArcherController {
     public void start(Player target) {
         stop();
         targetId = target.getUniqueId();
-        context.standDownTicks = 0;
+        context.releaseStandDown();
         context.movementController.clearFormationOrder();
         context.currentPath.clear();
         context.pathNodeIndex = 0;

@@ -128,7 +128,10 @@ public final class BotPersistence {
             gs.set("z", ctx.guardAnchor.getZ());
             gs.set("radius", ctx.guardRadius);
             gs.set("facing", ctx.guardFacing);
+            if (ctx.voiceHold) gs.set("voice", true);
         }
+
+        if (ctx.holdFire) sec.set("holdfire", true);
     }
 
     public int restore() {
@@ -218,8 +221,10 @@ public final class BotPersistence {
                 }
                 bot.setGuardPost(anchor, gs.getDouble("radius", 16.0),
                         (float) gs.getDouble("facing"), mode);
+                ai.getContext().voiceHold = gs.getBoolean("voice", false);
             }
         }
+        if (sec.getBoolean("holdfire", false)) ai.getContext().holdFire = true;
 
         ConfigurationSection ps = sec.getConfigurationSection("patrol");
         if (ps != null && plugin.getRouteManager() != null) {

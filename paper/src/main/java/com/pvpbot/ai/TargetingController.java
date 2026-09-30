@@ -105,7 +105,7 @@ public class TargetingController {
             context.forcedTarget = null;
         }
 
-        if (!context.settings.isHostile() || isFactionAttackStopped() || context.standDownTicks > 0) {
+        if (!context.settings.isHostile() || isFactionAttackStopped() || context.isStandingDown()) {
             context.target = null;
             context.assistTarget = null;
             context.lastDamager = null;
@@ -472,7 +472,7 @@ public class TargetingController {
     }
 
     public void notifyDamage(Player attacker) {
-        if (!context.settings.isHostile() || isFactionAttackStopped() || context.standDownTicks > 0) return;
+        if (!context.settings.isHostile() || isFactionAttackStopped() || context.isStandingDown()) return;
         if (attacker == null) return;
         context.lastDamager = attacker;
         context.lastDamageTime = context.tickCounter;
