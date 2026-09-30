@@ -28,7 +28,8 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Stay | everyone stay here · stay put · hold your position · don't move *(each bot keeps its spot - fights anyone who comes close, walks back - until the next order)* |
 | Alert | watch out · behind you · they're coming · get ready |
 | Formation | everyone go behind me · get behind me · fall in *(grid behind you, follows you until:)* break formation · at ease |
-| Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)* |
+| Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)*. Several areas at once: *Andy mine the area* here, *red team mine the area* over there - each group keeps its own |
+| Mine down to | everyone mine down to *name* · dig down to me *(each bot digs its own shaft straight down to their level, then tunnels across to them)* |
 | Destroy | everyone destroy the area · blow it up *(15×15; bots with TNT + flint & steel blast it, the rest use tools)* |
 | Stop mining | everyone stop mining · stop digging · stop destroying |
 | Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight; bots take different routes)* |
@@ -38,6 +39,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Build up | everyone build up · pillar up *(10 blocks up, every bot on its own column)* |
 | Path | everyone make a path there · build a bridge there *(covered 3-wide bridge with rails and a roof to the block you look at, up to 64 long; the bots share the work)* · stop building |
 | Look | everyone look at me |
+| Scatter | everyone scatter · spread out · split up · run away *(every bot runs off in a different direction)* |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
 | Commander | commander kill *name* *(the commander walks up to you, nods, then goes for them)* · commander come here · red commander kill *name*. Pick one with `/pvpbot faction commander <faction> <bot>` |
 
@@ -45,6 +47,10 @@ Every new order replaces the last one: bots drop whatever they were doing
 (digging, building, holding a spot, following, a climb, a bow duel) and do the
 new thing. Armor, "look at me" and "weapons free" are the exceptions - they
 don't interrupt anything.
+
+Bots that end up stuck in a hole (a pit, a shaft, a dug-out area) while you
+or the spot they were sent to is up above walk to the wall, pillar up beside
+it and step off at the top.
 
 Mining near water: bots plug water beside or above a block before breaking
 it, and a bot that ends up in water over the dig sinks to the bottom, digs 3

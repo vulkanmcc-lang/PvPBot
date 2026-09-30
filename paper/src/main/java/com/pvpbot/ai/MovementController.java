@@ -1441,6 +1441,19 @@ public class MovementController {
         return true;
     }
 
+    // One tick of jump-and-place-under pillaring on the spot (ClimbOutController).
+    public boolean pillarUpStep(Player botPlayer) {
+        ServerPlayer handle = context.bot.getHandle();
+        if (botPlayer == null || handle == null) return false;
+        return pillarOutOfHole(botPlayer, handle, botPlayer.getLocation());
+    }
+
+    // Boxed in below the ground around us (a pit, a shaft, a dug-out area).
+    public boolean isTrappedBelow(Location loc) {
+        ServerPlayer handle = context.bot.getHandle();
+        return handle != null && isInHoleOrPit(loc, handle);
+    }
+
     private boolean pillarOutOfHole(Player botPlayer, ServerPlayer handle, Location loc) {
         int slot = findBlockSlot(botPlayer);
         if (slot == -1) return false;

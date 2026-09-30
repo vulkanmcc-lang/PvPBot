@@ -15,6 +15,8 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.Damageable;
 
+import java.util.List;
+
 // One bot's part in an ExcavationJob: claim a block, get within reach of it,
 // break it with the right tool (pickaxe / shovel / axe / hands), repeat.
 // In DESTROY jobs a bot carrying TNT + flint & steel first works through the
@@ -76,6 +78,19 @@ public class ExcavationController {
     private boolean wet;          // this job has water in it: be patient with cells
     private boolean gaveSealBlocks;
 
+    // Performance
+    private static final int CLAIM_RETRY_TICKS = 10;
+    private static final int SPOT_REFRESH_TICKS = 40;
+    private int claimCooldown;
+    // "Do I carry the right tool for this?" per block type - the inventory
+    // scan is the expensive part of claiming, and tools rarely change.
+    private final java.util.Map<Material, Boolean> toolCache = new java.util.EnumMap<>(Material.class);
+    private int toolCacheTick = Integer.MIN_VALUE;
+    // Where to stand for the current cell (searched once, not every tick).
+    private ExcavationJob.Cell spotCell;
+    private Location spot;
+    private int spotAge;
+
     public ExcavationController(BotAIContext context) {
         this.context = context;
     }
@@ -103,6 +118,10 @@ public class ExcavationController {
         gaveSealBlocks = false;
         divesDone = 0;
         diveCooldown = 0;
+        claimCooldown = 0;
+        toolCache.clear();
+        spotCell = null;
+        spot = null;
         // A leftover "walk to this spot" order (come here / regroup) would
         // otherwise take priority over the work every tick.
         context.movementController.clearFormationOrder();
@@ -197,14 +216,23 @@ public class ExcavationController {
         }
 
         if (cell == null) {
-            cell = job.claim(context.bot.getUUID(), botPlayer, b -> canBreak(botPlayer, b));
+            if (claimCooldown > 0) {
+                claimCooldown--;
+                context.forwardInput = 0f;
+                context.strafeInput = 0f;
+                if (++idleTicks > IDLE_GIVE_UP_TICKS) abort();
+                return true;
+            }
+            cell = job.claim(context.bot.getUUID(), botPlayer, b -> canBreakCached(botPlayer, b));
             stallTicks = 0;
             if (cell == null) {
+                claimCooldown = CLAIM_RETRY_TICKS;
                 context.forwardInput = 0f;
                 context.strafeInput = 0f;
                 // Nothing we can do right now (other bots have the rest, or
                 // it all needs tools we don't carry): leave eventually.
-                if (++idleTicks > IDLE_GIVE_UP_TICKS) abort();
+                idleTicks++;
+                if (idleTicks > IDLE_GIVE_UP_TICKS) abort();
                 return true;
             }
             idleTicks = 0;
@@ -315,7 +343,12 @@ public class ExcavationController {
         // Walk to somewhere we can reach and see it from. No such spot at
         // all (a treetop, a roof out of reach): skip it now instead of
         // walking into the wall for seconds.
-        Location spot = standSpotFor(botPlayer, target);
+        if (spotCell != cell || ++spotAge > SPOT_REFRESH_TICKS) {
+            spot = standSpotFor(botPlayer, target);
+            spotCell = cell;
+            spotAge = 0;
+        }
+        Location spot = this.spot;
         if (spot == null && distSq > REACH_SQ) {
             if (wet) {
                 // Under water: it may become reachable once the dry part of
@@ -334,6 +367,7 @@ public class ExcavationController {
             if (wet) job.defer(cell, WET_RETRY_TICKS);
             else job.fail(cell);
             cell = null;
+            spotCell = null;
             context.currentPath.clear();
             context.pathNodeIndex = 0;
         }
@@ -434,6 +468,15 @@ public class ExcavationController {
 
         if (!ok && ExcavationJob.breakable(block.getType())) return -1;
         return 1;
+    }
+
+    private boolean canBreakCached(Player p, Block b) {
+        int now = org.bukkit.Bukkit.getCurrentTick();
+        if (now - toolCacheTick > 100) { // re-check every 5 s (picked up a pickaxe?)
+            toolCache.clear();
+            toolCacheTick = now;
+        }
+        return toolCache.computeIfAbsent(b.getType(), m -> canBreak(p, b));
     }
 
     // Can this bot break it in a useful way? Blocks that only drop with the
@@ -617,7 +660,7 @@ public class ExcavationController {
     // In water inside the job (or right at its edge) with something diggable
     // under the water: time to go under it.
     private boolean shouldDive(Player botPlayer) {
-        if (job.mode == ExcavationJob.Mode.TUNNEL) return false;
+        if (job.isLaneJob()) return false;
         if (diveCooldown > 0 || divesDone >= MAX_DIVES) return false;
         Location l = botPlayer.getLocation();
         if (!isWater(l.getBlock())) return false;
@@ -938,34 +981,47 @@ public class ExcavationController {
     // Movement / geometry
     // =====================================================================
 
+    // Somewhere to stand that can reach and see `target`. Candidates are
+    // tried nearest-first with the cheap checks first, so the ray casts
+    // (the expensive part) only run until the first good spot turns up.
     private Location standSpotFor(Player botPlayer, Block target) {
         Location me = botPlayer.getLocation();
-        Location best = null;
-        double bestD = Double.MAX_VALUE;
+        double tx = target.getX() + 0.5, ty = target.getY() + 0.5, tz = target.getZ() + 0.5;
+        List<double[]> cands = new java.util.ArrayList<>();
         for (int dy = -2; dy <= 2; dy++) {
             for (int dx = -3; dx <= 3; dx++) {
                 for (int dz = -3; dz <= 3; dz++) {
-                    int x = target.getX() + dx, y = target.getY() + dy, z = target.getZ() + dz;
                     if (dx == 0 && dz == 0 && (dy == 0 || dy == -1)) continue;
-                    if (!standable(x, y, z)) continue;
-                    Location feet = new Location(job.world, x + 0.5, y, z + 0.5);
-                    Location eye = feet.clone().add(0, 1.62, 0);
-                    if (distSq(eye, target) > REACH_SQ * 0.85) continue;
-                    if (firstSolidBetween(eye, target) != null) continue;
-                    double d = feet.distanceSquared(me);
-                    // Dry spots first: standing in water means mining at a
-                    // fifth of the speed (and a dive).
-                    if (isWater(job.world.getBlockAt(x, y, z)) || isWater(job.world.getBlockAt(x, y + 1, z))) {
-                        d += 60.0;
-                    }
-                    if (d < bestD) {
-                        bestD = d;
-                        best = feet;
-                    }
+                    int x = target.getX() + dx, y = target.getY() + dy, z = target.getZ() + dz;
+                    double ex = x + 0.5 - tx, ey = y + 1.62 - ty, ez = z + 0.5 - tz;
+                    if (ex * ex + ey * ey + ez * ez > REACH_SQ * 0.85) continue;
+                    double mx = x + 0.5 - me.getX(), my = y - me.getY(), mz = z + 0.5 - me.getZ();
+                    cands.add(new double[]{mx * mx + my * my + mz * mz, x, y, z});
                 }
             }
         }
-        return best;
+        cands.sort(java.util.Comparator.comparingDouble(c -> c[0]));
+        Location dryBest = null, wetBest = null;
+        double wetD = Double.MAX_VALUE;
+        for (double[] c : cands) {
+            if (dryBest != null) break;
+            // A dry spot farther than this loses to the wet one anyway.
+            if (wetBest != null && c[0] > wetD) break;
+            int x = (int) c[1], y = (int) c[2], z = (int) c[3];
+            if (!standable(x, y, z)) continue;
+            Location feet = new Location(job.world, x + 0.5, y, z + 0.5);
+            if (firstSolidBetween(feet.clone().add(0, 1.62, 0), target) != null) continue;
+            // Dry spots first: standing in water means mining at a fifth of
+            // the speed (and a dive).
+            boolean wetSpot = isWater(job.world.getBlockAt(x, y, z)) || isWater(job.world.getBlockAt(x, y + 1, z));
+            if (!wetSpot) {
+                dryBest = feet;
+            } else if (wetBest == null) {
+                wetBest = feet;
+                wetD = c[0] + 60.0;
+            }
+        }
+        return dryBest != null ? dryBest : wetBest;
     }
 
     private boolean standable(int x, int y, int z) {

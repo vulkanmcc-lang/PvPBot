@@ -45,10 +45,13 @@ public final class VoiceCommandParser {
         LOOK_AT_ME,
         PATH,       // covered 3-wide bridge to the block the speaker looks at
         ARMOR_BEST, // swap into the strongest armor they carry
-        ARMOR_WORST // swap into the weakest
+        ARMOR_WORST,// swap into the weakest
+        MINE_TO,    // dig straight down (then across) to a player below
+        SCATTER     // everyone runs off in a different direction
     }
 
-    public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION }
+    // SELF: the speaker ("mine down to me").
+    public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION, SELF }
 
     // subjectFaction == null and subjectBot == null means "everyone the
     // speaker commands"; subjectBot is set for "<bot> come here"; commander
@@ -146,6 +149,11 @@ public final class VoiceCommandParser {
                     "abort", "peace"),
             rule(Intent.ENGAGE,
                     "weapons free", "fight back", "free fire", "you can fight", "engage", "go wild"),
+            rule(Intent.MINE_TO,
+                    "mine down to {p}", "mine your way down to {p}", "mine your way to {p}", "mine to {p}",
+                    "dig down to {p}", "dig your way down to {p}", "dig your way to {p}", "dig to {p}",
+                    "tunnel down to {p}", "tunnel to {p}", "mine down towards {p}", "dig down towards {p}",
+                    "go down to {p}", "get down to {p}"),
             rule(Intent.PATH,
                     "make a path there", "make a path over there", "make a path", "build a path there",
                     "build a path", "make a bridge there", "make a bridge", "build a bridge there",
@@ -172,7 +180,7 @@ public final class VoiceCommandParser {
                     "get digging", "mine"),
             rule(Intent.BREAK_FORMATION,
                     "break formation", "break ranks", "at ease", "dismissed", "you are dismissed",
-                    "youre free", "you are free", "free roam", "do your own thing", "spread out"),
+                    "youre free", "you are free", "free roam", "do your own thing"),
             rule(Intent.FORMATION,
                     "go behind me", "get behind me", "stay behind me", "fall in behind me", "line up behind me",
                     "form up behind me", "get in formation", "form up", "fall in", "line up", "formation",
@@ -195,6 +203,10 @@ public final class VoiceCommandParser {
                     "get over here", "get here", "group up here", "group up", "meet me here", "meet me",
                     "we need to regroup", "regroup", "stay together", "stick together", "dont split up",
                     "stay close", "on me", "rally", "fall back", "come back"),
+            rule(Intent.SCATTER,
+                    "scatter", "spread out", "split up", "run away", "run for it", "run for your lives",
+                    "disperse", "everybody run", "go in different directions", "run in different directions",
+                    "break up", "fan out"),
             rule(Intent.ADVANCE,
                     "push forward", "move forward", "move up", "move out", "move together",
                     "keep moving", "keep pushing", "lets go", "lets move", "go go go", "go go",
@@ -387,6 +399,11 @@ public final class VoiceCommandParser {
                                         boolean lookVerb, Collection<String> factions,
                                         Collection<String> names) {
         String heard = String.join(" ", words);
+
+        if (intent == Intent.MINE_TO && !words.isEmpty() && words.size() <= 3
+                && (words.contains("me") || words.contains("my") || words.contains("us"))) {
+            return new Parsed(subject, addressed, intent, TargetKind.SELF, null, heard);
+        }
 
         if (words.isEmpty()) {
             // "everyone attack" -> whoever the speaker is looking at. Not for
@@ -750,7 +767,8 @@ public final class VoiceCommandParser {
             Map.entry("building", "build"), Map.entry("paths", "path"), Map.entry("bridges", "bridge"),
             Map.entry("pat", "path"), Map.entry("pass", "path"), Map.entry("bridging", "bridge"),
             Map.entry("worse", "worst"), Map.entry("bat", "bad"), Map.entry("vest", "best"),
-            Map.entry("staying", "stay"), Map.entry("stays", "stay"));
+            Map.entry("staying", "stay"), Map.entry("stays", "stay"), Map.entry("scattered", "scatter"),
+            Map.entry("scatters", "scatter"));
 
     static boolean wordMatches(String heard, String want) {
         if (heard.equals(want)) return true;

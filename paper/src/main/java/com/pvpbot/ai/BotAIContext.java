@@ -622,6 +622,7 @@ public class BotAIContext {
     public ReachController reachController;
     public ArcherController archerController;
     public CommanderController commanderController;
+    public ClimbOutController climbOutController;
     public TechniqueController techniqueController;
     public CartController cartController;
     public TunnelController tunnelController;
@@ -714,6 +715,7 @@ public class BotAIContext {
         this.reachController = new ReachController(this);
         this.archerController = new ArcherController(this);
         this.commanderController = new CommanderController(this);
+        this.climbOutController = new ClimbOutController(this);
         this.techniqueController = new TechniqueController(this);
         this.cartController = new CartController(this);
         this.tunnelController = new TunnelController(this);

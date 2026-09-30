@@ -257,7 +257,8 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             if (order.intent() != Intent.PATH) dropOrphanedVoiceBuild(speaker.getUniqueId(), manager);
         }
         boolean movement = switch (order.intent()) {
-            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, BREAK_FORMATION -> true;
+            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, BREAK_FORMATION,
+                 MINE_TO, SCATTER -> true;
             default -> false;
         };
         if (movement && order.intent() != Intent.FORMATION && order.subjectBot() == null && !order.commander()) {
@@ -566,10 +567,68 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 ok(speaker, transcript, who + " → " + (destroy ? "destroying" : "mining") + " a "
                         + size + "×" + size + " area, " + job.total() + " blocks (" + bots.size() + extra + ")");
             }
+            case MINE_TO -> {
+                Player victim = switch (order.targetKind()) {
+                    case SELF -> speaker;
+                    case NAME -> resolveName(manager, order.target());
+                    case LOOK -> lookedAt(speaker);
+                    case NEAREST -> nearest(speaker.getLocation(),
+                            enemiesNear(manager, speaker, speaker.getLocation(), NEAREST_RANGE),
+                            speaker.getUniqueId());
+                    default -> null;
+                };
+                if (victim == null) {
+                    fail(speaker, transcript, order.targetKind() == VoiceCommandParser.TargetKind.NAME
+                            ? order.target() + " isn't online"
+                            : order.heardTarget() != null && !order.heardTarget().isBlank()
+                            ? "no player sounds like \"" + order.heardTarget() + "\""
+                            : "say who to mine down to");
+                    return;
+                }
+                String vName = ChatColor.stripColor(victim.getName());
+                Location vLoc = victim.getLocation();
+                List<UUID> crew = new ArrayList<>();
+                List<Location> starts = new ArrayList<>();
+                List<PvPBot> diggers = new ArrayList<>();
+                int deepest = 0;
+                for (PvPBot b : bots) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp == null || b.getUUID().equals(victim.getUniqueId())) continue;
+                    if (bp.getWorld() != vLoc.getWorld()) continue;
+                    int drop = bp.getLocation().getBlockY() - vLoc.getBlockY();
+                    if (drop < 2) continue; // not above them - nothing to dig down through
+                    if (Math.hypot(bp.getLocation().getX() - vLoc.getX(), bp.getLocation().getZ() - vLoc.getZ())
+                            > com.pvpbot.mine.ExcavationJob.DIG_TO_MAX_ACROSS) continue;
+                    crew.add(b.getUUID());
+                    starts.add(bp.getLocation());
+                    diggers.add(b);
+                    deepest = Math.max(deepest, drop);
+                }
+                if (diggers.isEmpty()) {
+                    fail(speaker, transcript, vName + " isn't below them (or is too far away)");
+                    return;
+                }
+                com.pvpbot.mine.ExcavationJob job = com.pvpbot.mine.ExcavationJob.startDigTo(
+                        speaker.getUniqueId(), crew, starts, vLoc);
+                if (job.total() == 0) {
+                    job.cancel();
+                    fail(speaker, transcript, "nothing to dig through to " + vName);
+                    return;
+                }
+                for (PvPBot b : diggers) b.getAI().getContext().excavationController.join(job);
+                ok(speaker, transcript, who + " → mining down to " + vName + " (" + diggers.size()
+                        + " shaft" + (diggers.size() == 1 ? "" : "s") + ", " + deepest + " deep)");
+            }
+            case SCATTER -> {
+                int n = scatter(speaker, bots);
+                ok(speaker, transcript, who + " → scattering (" + n + ")");
+            }
             case WORK_STOP -> {
+                // The bots were already pulled off their digs above; a job
+                // with nobody left on it ends by itself, so other areas the
+                // speaker has other bots working on keep going.
                 int stopped = wasDigging;
                 boolean destroying = wasDestroying;
-                com.pvpbot.mine.ExcavationJob.stop(speaker.getUniqueId());
                 boolean building = stopVoiceBuild(speaker.getUniqueId(), manager);
                 if (building && stopped == 0) {
                     ok(speaker, transcript, who + " → stopped building");
@@ -615,6 +674,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         ctx.reachController.stop();
         ctx.archerController.stop();
         ctx.commanderController.stop();
+        ctx.climbOutController.stop();
         ctx.excavationController.abort();
         if (ctx.patrolController.isActive()) ctx.patrolController.stop();
         if (ctx.areaMiningController.isActive()) ctx.areaMiningController.abort();
@@ -820,6 +880,78 @@ public final class VoiceLink implements PluginMessageListener, Listener {
     }
 
     // ---- movement orders
+
+    private static final int SCATTER_TICKS = 20 * 20;
+
+    // Everyone runs a different way: directions spread evenly around the
+    // group, handed out in the order the bots already stand around its
+    // middle so nobody has to cross the pack to get to theirs.
+    private static int scatter(Player speaker, List<PvPBot> bots) {
+        List<PvPBot> crew = new ArrayList<>();
+        double cx = 0, cz = 0;
+        World w = null;
+        for (PvPBot b : bots) {
+            Player bp = b.getBukkitPlayer();
+            if (bp == null) continue;
+            if (w == null) w = bp.getWorld();
+            if (bp.getWorld() != w) continue;
+            crew.add(b);
+            cx += bp.getLocation().getX();
+            cz += bp.getLocation().getZ();
+        }
+        if (crew.isEmpty()) return 0;
+        cx /= crew.size();
+        cz /= crew.size();
+        final double mx = cx, mz = cz;
+        java.util.Map<PvPBot, Double> angleOf = new HashMap<>();
+        for (PvPBot b : crew) {
+            Location l = b.getBukkitPlayer().getLocation();
+            double a = crew.size() == 1 && speaker.getWorld() == l.getWorld()
+                    ? Math.atan2(l.getZ() - speaker.getLocation().getZ(), l.getX() - speaker.getLocation().getX())
+                    : Math.atan2(l.getZ() - mz, l.getX() - mx);
+            angleOf.put(b, a);
+        }
+        crew.sort(java.util.Comparator.comparingDouble(angleOf::get));
+        java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+        double base = angleOf.get(crew.get(0));
+        int n = crew.size();
+        int sent = 0;
+        for (int i = 0; i < n; i++) {
+            PvPBot b = crew.get(i);
+            double a = base + 2.0 * Math.PI * i / n + (rnd.nextDouble() - 0.5) * 0.3;
+            double dist = 14.0 + rnd.nextDouble() * 8.0;
+            double ox = crew.size() == 1 ? b.getBukkitPlayer().getLocation().getX() : mx;
+            double oz = crew.size() == 1 ? b.getBukkitPlayer().getLocation().getZ() : mz;
+            int x = (int) Math.floor(ox + Math.cos(a) * dist);
+            int z = (int) Math.floor(oz + Math.sin(a) * dist);
+            int nearY = b.getBukkitPlayer().getLocation().getBlockY();
+            int y = groundNear(w, x, z, nearY);
+            Location dest = new Location(w, x + 0.5, y, z + 0.5);
+            dest.setYaw((float) Math.toDegrees(Math.atan2(-Math.cos(a), Math.sin(a))));
+            b.orderToFormationSlot(dest, SCATTER_TICKS);
+            sent++;
+        }
+        return sent;
+    }
+
+    // A standable Y at (x, z) close to `nearY`.
+    private static int groundNear(World w, int x, int z, int nearY) {
+        for (int d = 0; d <= 10; d++) {
+            for (int y : new int[]{nearY + d, nearY - d}) {
+                if (y <= w.getMinHeight() || y >= w.getMaxHeight() - 2) continue;
+                org.bukkit.Material floor = w.getBlockAt(x, y - 1, z).getType();
+                if (floor.isSolid() && floor != org.bukkit.Material.MAGMA_BLOCK
+                        && !w.getBlockAt(x, y, z).getType().isSolid()
+                        && !w.getBlockAt(x, y + 1, z).getType().isSolid()
+                        && w.getBlockAt(x, y, z).getType() != org.bukkit.Material.LAVA) {
+                    return y;
+                }
+                if (d == 0) break;
+            }
+        }
+        int top = w.getHighestBlockYAt(x, z) + 1;
+        return Math.abs(top - nearY) <= 16 ? top : nearY;
+    }
 
     private int gatherAt(List<PvPBot> bots, Location anchor) {
         List<Location> slots = FormationManager.compute(anchor, FormationManager.Shape.SKIRMISH,

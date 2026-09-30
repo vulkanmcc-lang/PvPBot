@@ -78,6 +78,7 @@ public final class BotScheduler {
                 || (ctx.reachController != null && ctx.reachController.isActive())
                 || (ctx.archerController != null && ctx.archerController.isActive())
                 || (ctx.commanderController != null && ctx.commanderController.isActive())
+                || (ctx.climbOutController != null && ctx.climbOutController.isActive())
                 || (ctx.farmController != null && ctx.farmController.isActive())
 
                 || (ctx.cartController != null && ctx.cartController.isActive())

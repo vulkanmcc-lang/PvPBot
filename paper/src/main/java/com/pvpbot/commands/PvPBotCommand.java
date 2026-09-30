@@ -2985,6 +2985,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         player.sendMessage("§7orders: §f" + (ctx.holdFire ? "§eweapons down " : "")
                 + (ctx.voiceHold ? "§bholding " : "")
                 + (ctx.commanderPhase != 0 ? "§dcommander run " + ctx.commanderPhase + " " : "")
+                + (ctx.climbOutController.isActive() ? "§6climbing out " + ctx.climbOutController.status() + " " : "")
                 + "§7commander of faction: §f" + plugin.getBotManager().isCommander(ctx.bot.getUUID()));
 
         for (org.bukkit.potion.PotionEffect e : bp.getActivePotionEffects()) {
