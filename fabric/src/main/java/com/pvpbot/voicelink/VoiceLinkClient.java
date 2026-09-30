@@ -26,23 +26,29 @@ public final class VoiceLinkClient implements ClientModInitializer {
     // Words that address the bots. Only utterances containing one of these
     // (or a faction name the server sent us) ever leave this PC - everything
     // else you say on voice chat is recognised locally and thrown away.
-    private static final Set<String> ADDRESS_WORDS = Set.of(
+    private static final Set<String> ADDRESS_WORDS = words(
             "everyone", "everybody", "all", "bots", "team", "guys", "squad", "army",
             "boys", "lads", "yall", "troops", "crew", "gang", "fellas", "every");
 
     // Words that can open an unaddressed order ("focus Steve", "follow me").
     // The server sends its full list on join; this is the fallback.
-    private static final Set<String> DEFAULT_STARTERS = Set.of(
+    private static final Set<String> DEFAULT_STARTERS = words(
             "kill", "attack", "focus", "get", "take", "target", "push", "rush", "dont", "all",
             "stop", "hold", "nobody", "calm", "save", "come", "follow", "group", "meet", "regroup",
             "stay", "move", "lets", "keep", "go", "watch", "behind", "theyre", "wait", "we",
             "mine", "dig", "excavate", "destroy", "blow", "demolish", "level", "flatten", "break",
             "fall", "form", "line", "at", "dismissed", "quit", "pillar", "tower", "climb", "reach",
-            "bow", "bows", "shoot", "snipe", "fire", "use", "put", "take", "remove", "equip", "wear",
+            "bow", "bows", "shoot", "snipe", "fire", "use", "put", "remove", "equip", "wear",
             "armor", "armour", "gear", "suit", "strip", "every");
 
-    private static final Set<String> LEAD_IN = Set.of(
+    private static final Set<String> LEAD_IN = words(
             "ok", "okay", "hey", "yo", "alright", "right", "so", "and", "uh", "um", "now", "oi");
+
+    // Tolerates duplicates (Set.of throws on them at class load, which kills
+    // the whole mod before voice chat can even start).
+    private static Set<String> words(String... ws) {
+        return Set.copyOf(new java.util.LinkedHashSet<>(Arrays.asList(ws)));
+    }
 
     private static VoiceLinkConfig config;
     private static SpeechEngine engine;
