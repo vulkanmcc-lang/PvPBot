@@ -34,7 +34,10 @@ public class ExcavationController {
 
     private static final double REACH = 4.3;
     private static final double REACH_SQ = REACH * REACH;
-    private static final int STALL_TICKS = 50;
+    private static final int STALL_TICKS = 30;
+    // A bot never sits on one block longer than this (plus the block's own
+    // break time) - whatever the reason, it moves on to another.
+    private static final int CELL_WATCHDOG_TICKS = 160;
     private static final int IDLE_GIVE_UP_TICKS = 400;
     private static final double FLEE_DISTANCE = 9.0;
     private static final int FUSE_TICKS = 80;
@@ -90,6 +93,7 @@ public class ExcavationController {
     private ExcavationJob.Cell spotCell;
     private Location spot;
     private int spotAge;
+    private int cellTicks;
 
     public ExcavationController(BotAIContext context) {
         this.context = context;
@@ -326,6 +330,7 @@ public class ExcavationController {
                 return true;
             }
             idleTicks = 0;
+            cellTicks = 0;
         }
 
         tickWork(botPlayer, handle);
@@ -408,9 +413,14 @@ public class ExcavationController {
             cell = null;
             return;
         }
+        if (++cellTicks > CELL_WATCHDOG_TICKS + (breaking != null ? breakTotal : 0)) {
+            giveUpOnCell();
+            return;
+        }
 
         Location eye = botPlayer.getEyeLocation();
         double distSq = distSq(eye, target);
+        boolean blockedInReach = false;
         if (distSq <= REACH_SQ) {
             Block blocker = firstSolidBetween(eye, target);
             if (blocker == null) {
@@ -428,6 +438,9 @@ public class ExcavationController {
                 mine(botPlayer, handle, blocker, false); // it's part of the job anyway
                 return;
             }
+            // Close enough but something outside the dig (terrain past the
+            // edge, a tree) is in the way: we need a different spot.
+            blockedInReach = true;
         }
 
         // Walk to somewhere we can reach and see it from. No such spot at
@@ -439,6 +452,17 @@ public class ExcavationController {
             spotAge = 0;
         }
         Location spot = this.spot;
+        if (blockedInReach) {
+            Location me = botPlayer.getLocation();
+            boolean alreadyThere = spot != null
+                    && Math.hypot(spot.getX() - me.getX(), spot.getZ() - me.getZ()) < 0.6
+                    && Math.abs(spot.getY() - me.getY()) < 1.0;
+            if (spot == null || alreadyThere) {
+                // Nowhere better to stand from here: let someone else try it.
+                giveUpOnCell();
+                return;
+            }
+        }
         if (spot == null && distSq > REACH_SQ) {
             if (wet) {
                 // Under water: it may become reachable once the dry part of
@@ -453,14 +477,25 @@ public class ExcavationController {
             return;
         }
         walkTo(botPlayer, spot != null ? spot : target.getLocation().add(0.5, 1.0, 0.5));
-        if (stalled(botPlayer)) {
+        if (stalled(botPlayer)) giveUpOnCell();
+    }
+
+    // This bot can't get this block done: hand it on (other bots may reach
+    // it from their side) and pick another straight away.
+    private void giveUpOnCell() {
+        if (cell != null) {
             if (wet) job.defer(cell, WET_RETRY_TICKS);
-            else job.fail(cell);
-            cell = null;
-            spotCell = null;
-            context.currentPath.clear();
-            context.pathNodeIndex = 0;
+            else job.unreachableFor(cell, context.bot.getUUID());
         }
+        cell = null;
+        spotCell = null;
+        stallTicks = 0;
+        cellTicks = 0;
+        clearStage();
+        breaking = null;
+        claimCooldown = 0;
+        context.currentPath.clear();
+        context.pathNodeIndex = 0;
     }
 
     private void mine(Player botPlayer, ServerPlayer handle, Block block, boolean isCell) {
@@ -1165,7 +1200,7 @@ public class ExcavationController {
         MovementController mc = context.movementController;
         Location me = botPlayer.getLocation();
         double flat = Math.hypot(dest.getX() - me.getX(), dest.getZ() - me.getZ());
-        if (flat < 0.4 && Math.abs(dest.getY() - me.getY()) < 1.2) {
+        if (flat < 0.22 && Math.abs(dest.getY() - me.getY()) < 1.2) {
             context.forwardInput = 0f;
             context.strafeInput = 0f;
             return;

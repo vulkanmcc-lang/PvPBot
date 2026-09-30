@@ -582,20 +582,6 @@ public final class ExcavationJob {
         Location at = botPlayer.getLocation();
         int now = Bukkit.getCurrentTick();
 
-        // Pass 1, no block lookups: the claimable cells of the top two
-        // layers, nearest first.
-        List<Candidate> cands = new ArrayList<>();
-        for (int i = firstLive, n = cells.size(); i < n; i++) {
-            Cell c = cells.get(i);
-            if (c.y < topY - 1) break; // sorted top-down: nothing claimable below
-            if (c.done || c.owner != null || c.retryAt > now) continue;
-            if (c.cannot != null && c.cannot.contains(bot)) continue;
-            double dx = c.x + 0.5 - at.getX(), dy = c.y + 0.5 - at.getY(), dz = c.z + 0.5 - at.getZ();
-            cands.add(new Candidate(c, dx * dx + dy * dy * 2.0 + dz * dz));
-        }
-        if (cands.isEmpty()) return null;
-        cands.sort(Comparator.comparingDouble(Candidate::d));
-
         // Players (not bots) standing in the area: never dig out their floor.
         List<Location> people = null;
         for (Player p : world.getPlayers()) {
@@ -609,7 +595,38 @@ public final class ExcavationJob {
             people.add(l);
         }
 
-        // Pass 2: the real checks, nearest first, a bounded number per call.
+        // Top two layers first. If nothing there is up for grabs (all
+        // leased, or left over blocks this bot can't get to), open the next
+        // two layers down rather than have the crew stand around waiting on
+        // one awkward block.
+        List<Candidate> cands = new ArrayList<>();
+        int windowBottom = topY - 1;
+        int i = firstLive, n = cells.size();
+        while (true) {
+            for (; i < n; i++) {
+                Cell c = cells.get(i);
+                if (c.y < windowBottom) break; // sorted top-down
+                if (c.done || c.owner != null || c.retryAt > now) continue;
+                if (c.cannot != null && c.cannot.contains(bot)) continue;
+                double dx = c.x + 0.5 - at.getX(), dy = c.y + 0.5 - at.getY(), dz = c.z + 0.5 - at.getZ();
+                cands.add(new Candidate(c, dx * dx + dy * dy * 2.0 + dz * dz));
+            }
+            if (!cands.isEmpty()) {
+                cands.sort(Comparator.comparingDouble(Candidate::d));
+                Cell got = checkCandidates(cands, bot, canBreak, people);
+                if (got != null) return got;
+                cands.clear();
+            }
+            if (i >= n || topY - windowBottom >= MAX_LAYER_SKIP) return null;
+            windowBottom -= 2;
+        }
+    }
+
+    private static final int MAX_LAYER_SKIP = 12;
+
+    // The real checks (block lookups), nearest first, a bounded number.
+    private Cell checkCandidates(List<Candidate> cands, UUID bot, java.util.function.Predicate<Block> canBreak,
+                                 List<Location> people) {
         int checks = 0;
         for (Candidate cand : cands) {
             if (checks++ >= CLAIM_CHECKS) break;
@@ -716,6 +733,22 @@ public final class ExcavationJob {
 
     public void release(Cell c) {
         if (c != null && !c.done) c.owner = null;
+    }
+
+    // This bot can't get at it (walled off from where it can stand, or the
+    // walk there keeps failing). Another bot coming from elsewhere may
+    // still manage, so only when every crew member has failed it is it
+    // dropped for good.
+    public void unreachableFor(Cell c, UUID bot) {
+        if (c == null || c.done) return;
+        c.owner = null;
+        if (isLaneJob()) {
+            if (++c.failures >= MAX_CELL_FAILURES) markDone(c);
+            return;
+        }
+        if (c.cannot == null) c.cannot = new java.util.HashSet<>();
+        c.cannot.add(bot);
+        if (c.cannot.size() >= Math.max(1, crew.size())) markDone(c);
     }
 
     // Can't be done yet but may be later (no dry spot to stand on until the
