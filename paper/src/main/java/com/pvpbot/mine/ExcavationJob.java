@@ -27,7 +27,7 @@ import java.util.UUID;
 // TNT and flint & steel blow those first, then everyone cleans up with
 // tools.
 public final class ExcavationJob {
-    public enum Mode { MINE, DESTROY }
+    public enum Mode { MINE, DESTROY, TUNNEL }
 
     public static final class Cell {
         public final int x, y, z;
@@ -37,6 +37,10 @@ public final class ExcavationJob {
         boolean done;
         // Crew members without the right tool for it (stone with no pickaxe).
         java.util.Set<UUID> cannot;
+        // TUNNEL only: which bot's tunnel this cell belongs to, and its order
+        // along it (dug front to back).
+        int lane = -1;
+        int seq;
 
         Cell(int x, int y, int z) {
             this.x = x;
@@ -137,6 +141,109 @@ public final class ExcavationJob {
         BY_REQUESTER.clear();
     }
 
+    // ---------------------------------------------------------------------
+    // Tunnels: one 1x2 tunnel per bot the way the speaker faces, spread out
+    // sideways (0, +3, -3, +6, -6 ...) and at different depths (level, a
+    // few blocks up, a few blocks down - reached by a gentle staircase so
+    // the bot can walk it).
+    // ---------------------------------------------------------------------
+
+    private final Map<UUID, Integer> laneOf = new HashMap<>();
+
+    public static ExcavationJob startTunnel(UUID requester, Location origin, int dirX, int dirZ,
+                                            List<UUID> crew, int length) {
+        World w = origin.getWorld();
+        int sx = origin.getBlockX(), sy = origin.getBlockY(), sz = origin.getBlockZ();
+        int rx = -dirZ, rz = dirX; // right-hand side of the direction
+
+        List<Cell> made = new ArrayList<>();
+        for (int lane = 0; lane < crew.size(); lane++) {
+            int lat = lane == 0 ? 0 : ((lane + 1) / 2) * 3 * (lane % 2 == 1 ? 1 : -1);
+            int vTarget = switch (lane % 3) {
+                case 1 -> 3;
+                case 2 -> -3;
+                default -> 0;
+            };
+            int prevY = sy;
+            int prevX = sx + rx * lat, prevZ = sz + rz * lat;
+            int seq = 0;
+            for (int k = 1; k <= length; k++) {
+                int rise = Integer.signum(vTarget) * Math.min(Math.abs(vTarget), k / 2);
+                int x = sx + dirX * k + rx * lat;
+                int z = sz + dirZ * k + rz * lat;
+                int y = sy + rise;
+                if (y > prevY) {
+                    // Stepping up: clear head room above the step we're on.
+                    made.add(laneCell(prevX, prevY + 2, prevZ, lane, seq++));
+                }
+                made.add(laneCell(x, y + 1, z, lane, seq++));
+                made.add(laneCell(x, y, z, lane, seq++));
+                if (y < prevY) {
+                    // Stepping down: the old floor ahead goes too.
+                    made.add(laneCell(x, y + 2, z, lane, seq++));
+                }
+                prevX = x;
+                prevY = y;
+                prevZ = z;
+            }
+        }
+
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        for (Cell c : made) {
+            minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+            minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+            minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+        }
+        ExcavationJob job = new ExcavationJob(Mode.TUNNEL, w, requester, MAX_DURATION_MS,
+                minX, minY, minZ, maxX, maxY, maxZ);
+        for (Cell c : made) {
+            if (c.y <= w.getMinHeight() || c.y >= w.getMaxHeight()) continue;
+            job.cells.add(c);
+            job.byPos.putIfAbsent(key(c.x, c.y, c.z), c);
+        }
+        for (int i = 0; i < crew.size(); i++) job.laneOf.put(crew.get(i), i);
+        job.topY = maxY;
+
+        ExcavationJob old = BY_REQUESTER.put(requester, job);
+        if (old != null) old.cancel();
+        return job;
+    }
+
+    private static Cell laneCell(int x, int y, int z, int lane, int seq) {
+        Cell c = new Cell(x, y, z);
+        c.lane = lane;
+        c.seq = seq;
+        return c;
+    }
+
+    private Cell claimInLane(UUID bot, Player botPlayer, java.util.function.Predicate<Block> canBreak) {
+        Integer lane = laneOf.get(bot);
+        if (lane == null) {
+            lane = laneOf.size();
+            laneOf.put(bot, lane);
+        }
+        Cell best = null;
+        for (Cell c : cells) {
+            if (c.lane != lane || c.done || c.owner != null) continue;
+            Block b = world.getBlockAt(c.x, c.y, c.z);
+            if (!breakable(b.getType())) {
+                c.done = true; // already open (cave, air) - walk through
+                continue;
+            }
+            if (!canBreak.test(b)) {
+                c.done = true; // e.g. stone without a pickaxe: this lane stops being dug here
+                continue;
+            }
+            if (best == null || c.seq < best.seq) best = c;
+        }
+        if (best != null) {
+            best.owner = bot;
+            best.leaseTicks = LEASE_TICKS;
+        }
+        return best;
+    }
+
     private void scan(int cx, int cz) {
         for (int y = maxY; y >= minY; y--) {
             for (int x = minX; x <= maxX; x++) {
@@ -212,6 +319,7 @@ public final class ExcavationJob {
 
     public Cell claim(UUID bot, Player botPlayer, java.util.function.Predicate<Block> canBreak) {
         if (isFinished()) return null;
+        if (mode == Mode.TUNNEL) return claimInLane(bot, botPlayer, canBreak);
         Location at = botPlayer.getLocation();
         Cell best = null;
         double bestD = Double.MAX_VALUE;

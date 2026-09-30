@@ -19,7 +19,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 
 | | examples |
 |---|---|
-| Attack | everyone kill *name* · focus *name* · take out *name* · all on *name* · *name* is our target · don't let *name* escape · everyone kill him *(whoever you're looking at)* · kill the closest guy · red team attack blue |
+| Attack | everyone kill *name* *(one of your own bots: it's kicked from the faction first so the rest fight it)* · focus *name* · take out *name* · all on *name* · *name* is our target · don't let *name* escape · everyone kill him *(whoever you're looking at)* · kill the closest guy · red team attack blue |
 | Rush | push them · rush them now |
 | Stand down (20 s, works with or without factions) | guys stop fighting · hold your fire · everyone chill · nobody fight · calm down guys |
 | Come | come to me · get over here · everyone regroup · stay together · don't split up |
@@ -31,9 +31,13 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Mine | everyone mine the area · dig here *(the area you're looking at, 11×11, dug top-down with pickaxes/shovels)* |
 | Destroy | everyone destroy the area · blow it up *(15×15; bots with TNT + flint & steel blast it, the rest use tools)* |
 | Stop mining | everyone stop mining · stop digging · stop destroying |
-| Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight)* |
+| Pillar to | everyone pillar to *name* · tower up to *name* · get to him *(walk / bridge / pillar up to them with blocks, then fight; bots take different routes)* |
 | Bow | everyone bow *name* · shoot *name* · use your bows on *name* *(bots with a bow + arrows keep range and shoot; the rest go melee)* |
 | Armor | everyone put your armor on · gear up · everyone take your armor off |
+| Tunnel | everyone tunnel this way *(each bot digs its own 32-long tunnel the way you face - side by side, some level, some ramping up, some down)* |
+| Build up | everyone build up · pillar up *(10 blocks up, every bot on its own column)* |
+| Path | everyone make a path there · build a bridge there *(covered 3-wide bridge with rails and a roof to the block you look at, up to 64 long; the bots share the work)* · stop building |
+| Look | everyone look at me |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
 
 Names don't have to be pronounceable: `NexarVo1d` works as "nexar void" (or

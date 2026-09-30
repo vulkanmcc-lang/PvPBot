@@ -102,16 +102,12 @@ public class BuildJob {
     private boolean cancelled = false;
 
     public BuildJob(Schematic schem, World world, int ox, int oy, int oz, String faction) {
-        this.schematicName = schem.name;
-        this.world = world;
-        this.originX = ox;
-        this.originY = oy;
-        this.originZ = oz;
-        this.faction = faction;
+        this(schem.name, world, ox, oy, oz, faction, tasksFrom(schem, ox, oy, oz),
+                ox + schem.width / 2.0, oz + schem.length / 2.0);
+    }
 
+    private static List<Task> tasksFrom(Schematic schem, int ox, int oy, int oz) {
         List<Task> list = new ArrayList<>();
-        double cx = schem.width / 2.0, cz = schem.length / 2.0;
-
         for (int y = 0; y < schem.height; y++) {
             for (int z = 0; z < schem.length; z++) {
                 for (int x = 0; x < schem.width; x++) {
@@ -124,12 +120,50 @@ public class BuildJob {
                 }
             }
         }
+        return list;
+    }
 
-        final double fcx = cx, fcz = cz;
+    // One block of a generated build (no schematic file): a voice-ordered
+    // bridge, a wall, etc.
+    public record Placement(int x, int y, int z, BlockData data) {
+    }
+
+    // Build job from a generated block list. Work is handed out layer by
+    // layer and, within a layer, nearest to (startX, startZ) first - so a
+    // bridge grows outward from where it was ordered.
+    public static BuildJob fromPlacements(String name, World world, List<Placement> blocks,
+                                          int startX, int startY, int startZ, String faction) {
+        List<Task> list = new ArrayList<>();
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        for (Placement p : blocks) {
+            Material m = p.data().getMaterial();
+            if (m.isAir() || !m.isBlock() || !m.isItem()) continue;
+            if (!seen.add(key(p.x(), p.y(), p.z()))) continue;
+            list.add(new Task(p.x(), p.y(), p.z(), p.data(), m));
+        }
+        return new BuildJob(name, world, startX, startY, startZ, faction, list, startX + 0.5, startZ + 0.5);
+    }
+
+    // Materials needed, for handing out to the crew.
+    public Map<Material, Integer> bill() {
+        Map<Material, Integer> out = new java.util.LinkedHashMap<>();
+        for (Task t : tasks) if (!t.done) out.merge(t.item, 1, Integer::sum);
+        return out;
+    }
+
+    private BuildJob(String name, World world, int ox, int oy, int oz, String faction,
+                     List<Task> list, double sortCx, double sortCz) {
+        this.schematicName = name;
+        this.world = world;
+        this.originX = ox;
+        this.originY = oy;
+        this.originZ = oz;
+        this.faction = faction;
+
         list.sort(Comparator
                 .comparingInt((Task t) -> t.y)
                 .thenComparingDouble(t -> {
-                    double dx = (t.x - ox) - fcx, dz = (t.z - oz) - fcz;
+                    double dx = (t.x + 0.5) - sortCx, dz = (t.z + 0.5) - sortCz;
                     return dx * dx + dz * dz;
                 }));
 

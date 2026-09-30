@@ -217,7 +217,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         // order to go somewhere or work also ends a patrol, which would
         // otherwise keep the bot on its route.
         boolean relocates = switch (order.intent()) {
-            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, FORMATION, PILLAR_TO, BOW -> true;
+            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, PILLAR_TO, BOW -> true;
             default -> false;
         };
         for (PvPBot b : bots) {
@@ -227,7 +227,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             if (relocates && ctx.patrolController.isActive()) ctx.patrolController.stop();
         }
         boolean movement = switch (order.intent()) {
-            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, FORMATION, BREAK_FORMATION -> true;
+            case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, BREAK_FORMATION -> true;
             default -> false;
         };
         if (movement) {
@@ -350,6 +350,111 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                             + (melee > 0 ? ", " + melee + " without - melee" : "") + ")");
                 }
             }
+            case PATH -> {
+                cancelFollow(speaker.getUniqueId());
+                org.bukkit.block.Block aim = speaker.getTargetBlockExact(160);
+                if (aim == null) {
+                    fail(speaker, transcript, "look at the block the path should go to");
+                    return;
+                }
+                List<com.pvpbot.schem.BuildJob.Placement> blocks =
+                        com.pvpbot.schem.PathPlan.plan(speaker.getLocation(), aim.getLocation());
+                if (blocks.isEmpty()) {
+                    fail(speaker, transcript, "nothing to build - it's too close or already solid");
+                    return;
+                }
+                stopVoiceBuild(speaker.getUniqueId(), manager);
+                String key = VOICE_BUILD_PREFIX + speaker.getUniqueId();
+                com.pvpbot.schem.BuildJob job = com.pvpbot.schem.BuildJob.fromPlacements(
+                        "path", speaker.getWorld(), blocks,
+                        speaker.getLocation().getBlockX(), speaker.getLocation().getBlockY() - 1,
+                        speaker.getLocation().getBlockZ(), who);
+                List<Player> crewPlayers = new ArrayList<>();
+                for (PvPBot b : bots) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp != null) crewPlayers.add(bp);
+                }
+                job.distribute(crewPlayers, job.bill());
+                plugin.getBuildJobs().put(key, job);
+                for (PvPBot b : bots) {
+                    b.setForcedTarget(null);
+                    b.getAI().getContext().buildController.assign(job);
+                }
+                double dist = speaker.getLocation().distance(aim.getLocation());
+                ok(speaker, transcript, who + " → building a covered path "
+                        + (int) Math.min(dist, com.pvpbot.schem.PathPlan.MAX_LENGTH) + " blocks long ("
+                        + job.total() + " blocks, " + bots.size() + " builders)");
+            }
+            case TUNNEL -> {
+                cancelFollow(speaker.getUniqueId());
+                float yaw = speaker.getLocation().getYaw();
+                int dirX = 0, dirZ = 0;
+                // Snap to the nearest compass direction: straight tunnels.
+                int q = Math.round(((yaw % 360) + 360) % 360 / 90f) % 4;
+                switch (q) {
+                    case 0 -> dirZ = 1;   // south
+                    case 1 -> dirX = -1;  // west
+                    case 2 -> dirZ = -1;  // north
+                    default -> dirX = 1;  // east
+                }
+                List<UUID> crew = new ArrayList<>();
+                for (PvPBot b : bots) crew.add(b.getUUID());
+                com.pvpbot.mine.ExcavationJob job = com.pvpbot.mine.ExcavationJob.startTunnel(
+                        speaker.getUniqueId(), speaker.getLocation(), dirX, dirZ, crew, TUNNEL_LENGTH);
+                for (PvPBot b : bots) {
+                    b.setForcedTarget(null);
+                    b.getAI().getContext().excavationController.join(job);
+                }
+                String[] names = {"south", "west", "north", "east"};
+                ok(speaker, transcript, who + " → tunnelling " + names[q] + " (" + bots.size()
+                        + " tunnels, " + TUNNEL_LENGTH + " long)");
+            }
+            case BUILD_UP -> {
+                cancelFollow(speaker.getUniqueId());
+                // Give every bot its own column (its current one if nobody
+                // else has it, else the nearest free one) so no two of them
+                // try to place on the same block.
+                java.util.Set<Long> taken = new java.util.HashSet<>();
+                int started = 0, given = 0;
+                for (PvPBot b : bots) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp == null) continue;
+                    int[] col = freeColumnNear(bp.getLocation(), taken);
+                    if (col == null) continue;
+                    taken.add(columnKey(col[0], col[1]));
+                    b.setForcedTarget(null);
+                    b.getAI().getContext().excavationController.abort();
+                    if (b.getAI().getContext().reachController.startTower(col[0], col[1], BUILD_UP_HEIGHT)) given++;
+                    started++;
+                }
+                ok(speaker, transcript, who + " → building up " + BUILD_UP_HEIGHT + " blocks (" + started + ")"
+                        + (given > 0 ? " - gave " + given + " cobblestone" : ""));
+            }
+            case LOOK_AT_ME -> {
+                UUID id = speaker.getUniqueId();
+                List<PvPBot> crew = new ArrayList<>(bots);
+                final int[] left = {LOOK_TICKS};
+                Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+                    Player p = Bukkit.getPlayer(id);
+                    if (p == null || !p.isOnline() || --left[0] <= 0) {
+                        task.cancel();
+                        return;
+                    }
+                    Location eye = p.getEyeLocation();
+                    for (PvPBot b : crew) {
+                        Player bp = b.getBukkitPlayer();
+                        if (bp == null || !b.isAlive() || bp.getWorld() != eye.getWorld()) continue;
+                        var ctx = b.getAI().getContext();
+                        if (ctx.target != null) continue; // fighting beats looking
+                        Location be = bp.getEyeLocation();
+                        double dx = eye.getX() - be.getX(), dy = eye.getY() - be.getY(), dz = eye.getZ() - be.getZ();
+                        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                        float pitch = (float) Math.toDegrees(-Math.atan2(dy, Math.hypot(dx, dz)));
+                        ctx.requestLook(yaw, pitch, com.pvpbot.ai.BotAIContext.LOOK_UTILITY + 10, false);
+                    }
+                }, 0L, 1L);
+                ok(speaker, transcript, who + " → looking at you (" + bots.size() + ")");
+            }
             case ARMOR_ON, ARMOR_OFF -> {
                 boolean on = order.intent() == Intent.ARMOR_ON;
                 int n = 0;
@@ -428,10 +533,75 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     }
                 }
                 com.pvpbot.mine.ExcavationJob.stop(speaker.getUniqueId());
+                boolean building = stopVoiceBuild(speaker.getUniqueId(), manager);
+                if (building && stopped == 0) {
+                    ok(speaker, transcript, who + " → stopped building");
+                    return;
+                }
                 ok(speaker, transcript, who + " → stopped " + (destroying ? "destroying" : "mining")
                         + " (" + stopped + ")");
             }
         }
+    }
+
+    private static final String VOICE_BUILD_PREFIX = "voice-path-";
+
+    // Cancel this speaker's voice-ordered path build: bots leave it, its
+    // scaffold is cleared. Blocks already placed stay.
+    private boolean stopVoiceBuild(UUID speaker, BotManager manager) {
+        com.pvpbot.schem.BuildJob old = plugin.getBuildJobs().remove(VOICE_BUILD_PREFIX + speaker);
+        if (old == null) return false;
+        old.cancel();
+        for (PvPBot b : manager.getBots().values()) {
+            var bc = b.getAI().getContext().buildController;
+            if (bc.currentJob() == old) bc.abort();
+        }
+        old.removeScaffoldNow((UUID) null);
+        return true;
+    }
+
+    private static final int TUNNEL_LENGTH = 32;
+    private static final int BUILD_UP_HEIGHT = 10;
+    private static final int LOOK_TICKS = 20 * 6;
+
+    private static long columnKey(int x, int z) {
+        return ((long) x << 32) ^ (z & 0xffffffffL);
+    }
+
+    // Nearest column to `at` with solid ground and head room that no other
+    // bot in this order has taken (searched in growing rings).
+    private static int[] freeColumnNear(Location at, java.util.Set<Long> taken) {
+        World w = at.getWorld();
+        int bx = at.getBlockX(), by = at.getBlockY(), bz = at.getBlockZ();
+        for (int r = 0; r <= 5; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue;
+                    int x = bx + dx, z = bz + dz;
+                    if (taken.contains(columnKey(x, z))) continue;
+                    // Keep a one-block gap between towers so nobody bumps.
+                    boolean crowded = false;
+                    for (int ax = -1; ax <= 1 && !crowded; ax++) {
+                        for (int az = -1; az <= 1; az++) {
+                            if ((ax != 0 || az != 0) && taken.contains(columnKey(x + ax, z + az))) {
+                                crowded = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (crowded) continue;
+                    for (int y = by + 1; y >= by - 2; y--) {
+                        if (w.getBlockAt(x, y - 1, z).getType().isSolid()
+                                && !w.getBlockAt(x, y, z).getType().isSolid()
+                                && !w.getBlockAt(x, y + 1, z).getType().isSolid()
+                                && !w.getBlockAt(x, y + 2, z).getType().isSolid()) {
+                            return new int[]{x, z};
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // The block the speaker is looking at (within 48), else 8 blocks ahead.
@@ -484,6 +654,25 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     fail(speaker, transcript, "they won't turn on you");
                     return;
                 }
+                // Ordering a hit on one of your own faction's bots kicks it out
+                // of the faction first, so it stops counting as a friend (the
+                // rest will actually fight it and it fights back).
+                String kickedFrom = null;
+                PvPBot victimBot = manager.getBots().get(victim.getUniqueId());
+                if (victimBot != null) {
+                    String vf = manager.getPlayerFaction(victim.getUniqueId());
+                    if (vf != null && speaker.getUniqueId().equals(manager.getFactionLeader(vf))) {
+                        var vctx = victimBot.getAI().getContext();
+                        vctx.reachController.stop();
+                        vctx.archerController.stop();
+                        vctx.excavationController.abort();
+                        vctx.movementController.clearFormationOrder();
+                        victimBot.setForcedTarget(null);
+                        manager.removeFromAllFactions(victim.getUniqueId());
+                        manager.saveFactionsToConfig();
+                        kickedFrom = vf;
+                    }
+                }
                 int sent = 0;
                 for (PvPBot b : bots) {
                     if (b.getUUID().equals(victim.getUniqueId())) continue;
@@ -491,7 +680,8 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     sent++;
                 }
                 ok(speaker, transcript, who + " → attacking "
-                        + ChatColor.stripColor(victim.getName()) + " (" + sent + ")");
+                        + ChatColor.stripColor(victim.getName()) + " (" + sent + ")"
+                        + (kickedFrom != null ? " - kicked from " + kickedFrom.toLowerCase() : ""));
             }
             case NONE -> fail(speaker, transcript,
                     order.heardTarget() == null || order.heardTarget().isBlank()

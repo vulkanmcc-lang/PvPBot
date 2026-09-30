@@ -119,6 +119,10 @@ public class BuildController {
                 + " grnd=" + (lastGroundY == Integer.MIN_VALUE ? "never" : String.valueOf(lastGroundY));
     }
 
+    public BuildJob currentJob() {
+        return job;
+    }
+
     public boolean hasJob() {
         return job != null && !job.isFinished();
     }

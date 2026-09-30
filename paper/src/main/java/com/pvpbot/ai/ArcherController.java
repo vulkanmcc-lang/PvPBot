@@ -154,8 +154,12 @@ public class ArcherController {
 
         // ---- aim (always, so the bot looks where it'll shoot)
         double[] aim = solveAim(botPlayer.getEyeLocation(), target);
-        context.requestLookYaw((float) aim[0], BotAIContext.LOOK_COMBAT);
-        context.requestLookPitch((float) aim[1], BotAIContext.LOOK_COMBAT);
+        // Yaw and pitch in ONE request: two separate same-priority requests
+        // drop the second, which left bots staring at the sky.
+        context.requestLook((float) aim[0], (float) aim[1], BotAIContext.LOOK_COMBAT + 5, false);
+        float yawErr = Math.abs(wrap((float) aim[0] - handle.getYRot()));
+        float pitchErr = Math.abs((float) aim[1] - handle.getXRot());
+        boolean onTarget = yawErr < 6f && pitchErr < 6f;
 
         // ---- draw & release
         int slot = bowSlot(botPlayer);
@@ -184,7 +188,8 @@ public class ArcherController {
             drawing = false;
             return true;
         }
-        if (drawTicks < (crossbow ? CROSSBOW_DRAW_TICKS : BOW_DRAW_TICKS) || !sight) return true;
+        // Fully drawn but not lined up yet: hold the draw until we are.
+        if (drawTicks < (crossbow ? CROSSBOW_DRAW_TICKS : BOW_DRAW_TICKS) || !sight || !onTarget) return true;
 
         handle.stopUsingItem();
         context.packetBroadcaster.broadcastEntityData();
@@ -304,6 +309,13 @@ public class ArcherController {
             vy = vy * 0.99 - 0.05;
         }
         return new double[]{Double.NaN, 120};
+    }
+
+    private static float wrap(float deg) {
+        deg %= 360f;
+        if (deg >= 180f) deg -= 360f;
+        if (deg < -180f) deg += 360f;
+        return deg;
     }
 
     private void trackVelocity(Player target) {

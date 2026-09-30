@@ -174,7 +174,72 @@ public class ExcavationController {
     // Breaking blocks
     // =====================================================================
 
+    private static final int MIN_BREAK_TICKS = 5;
+    private static final int BETWEEN_BLOCKS_TICKS = 4;
+    private int breakTotal = 1;
+    private int pauseTicks = 0;
+
+    // Survival break time in ticks, worked out the way vanilla does it
+    // (tool tier + Efficiency, Haste / Mining Fatigue, off-ground and
+    // underwater penalties, wrong-tool penalty), with a floor so nothing
+    // pops instantly - a bot swinging a god pickaxe still visibly mines.
+    private int breakTicksFor(Player p, Block b) {
+        float hardness;
+        try {
+            hardness = b.getType().getHardness();
+        } catch (Throwable t) {
+            hardness = 1.5f;
+        }
+        if (hardness < 0) return 600;
+        if (hardness == 0) return 2;
+
+        ItemStack tool = p.getInventory().getItemInMainHand();
+        boolean preferred = tool != null && !tool.getType().isAir() && b.isPreferredTool(tool);
+        double speed = 1.0;
+        if (preferred) {
+            speed = toolSpeed(tool.getType());
+            int eff = tool.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.EFFICIENCY);
+            if (eff > 0 && speed > 1.0) speed += eff * eff + 1;
+        }
+        var haste = p.getPotionEffect(org.bukkit.potion.PotionEffectType.HASTE);
+        if (haste != null) speed *= 1.0 + 0.2 * (haste.getAmplifier() + 1);
+        var fatigue = p.getPotionEffect(org.bukkit.potion.PotionEffectType.MINING_FATIGUE);
+        if (fatigue != null) speed *= Math.pow(0.3, Math.min(4, fatigue.getAmplifier() + 1));
+        if (p.isInWater()) speed /= 5.0;
+        if (!p.isOnGround()) speed /= 5.0;
+
+        boolean needsTool;
+        try {
+            needsTool = b.getBlockData().requiresCorrectToolForDrops();
+        } catch (Throwable t) {
+            needsTool = false;
+        }
+        boolean canHarvest = !needsTool || preferred;
+        double perTick = speed / hardness / (canHarvest ? 30.0 : 100.0);
+        int ticks = (int) Math.ceil(1.0 / Math.max(perTick, 1.0e-4));
+        return Math.max(MIN_BREAK_TICKS, Math.min(ticks, 600));
+    }
+
+    private static double toolSpeed(Material m) {
+        String n = m.name();
+        if (m == Material.SHEARS) return 2.0;
+        if (n.endsWith("_SWORD")) return 1.5;
+        if (n.startsWith("NETHERITE")) return 9.0;
+        if (n.startsWith("DIAMOND")) return 8.0;
+        if (n.startsWith("IRON")) return 6.0;
+        if (n.startsWith("STONE")) return 4.0;
+        if (n.startsWith("GOLDEN")) return 12.0;
+        if (n.startsWith("WOODEN")) return 2.0;
+        return 1.0;
+    }
+
     private void tickWork(Player botPlayer, ServerPlayer handle) {
+        if (pauseTicks > 0) {
+            pauseTicks--;
+            context.forwardInput = 0f;
+            context.strafeInput = 0f;
+            return;
+        }
         Block target = job.world.getBlockAt(cell.x, cell.y, cell.z);
         if (!ExcavationJob.breakable(target.getType())) {
             job.complete(cell);
@@ -242,15 +307,11 @@ public class ExcavationController {
             context.packetBroadcaster.broadcastAnimation(handle, 0);
         }
 
-        float speed;
-        try {
-            speed = block.getBreakSpeed(botPlayer);
-        } catch (Throwable t) {
-            speed = 0.05f;
-        }
-        breakProgress += Math.max(speed, 0.002f);
+        if (breakTicks == 1) breakTotal = breakTicksFor(botPlayer, block);
+        breakProgress = (float) breakTicks / Math.max(1, breakTotal);
         sendStage(block, (int) (breakProgress * 10));
-        if (breakProgress < 1.0f && breakTicks < 600) return;
+        if (breakTicks < breakTotal) return;
+        pauseTicks = BETWEEN_BLOCKS_TICKS;
 
         clearStage();
         breaking = null;
@@ -645,9 +706,9 @@ public class ExcavationController {
     private void lookAt(Player botPlayer, Location at) {
         Location eye = botPlayer.getEyeLocation();
         double dx = at.getX() - eye.getX(), dy = at.getY() - eye.getY(), dz = at.getZ() - eye.getZ();
-        context.requestLookYaw((float) Math.toDegrees(Math.atan2(-dx, dz)), BotAIContext.LOOK_COMBAT);
-        context.requestLookPitch((float) Math.toDegrees(-Math.atan2(dy, Math.max(0.001, Math.hypot(dx, dz)))),
-                BotAIContext.LOOK_COMBAT);
+        context.requestLook((float) Math.toDegrees(Math.atan2(-dx, dz)),
+                (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.001, Math.hypot(dx, dz)))),
+                BotAIContext.LOOK_COMBAT, false);
     }
 
     private static double distSq(Location eye, Block b) {

@@ -344,6 +344,13 @@ public class BotAIContext {
     }
 
     public void requestLookYaw(float yaw, int priority) {
+        // A pitch-only request at the same priority this tick: complete it
+        // into a full look instead of ignoring the yaw.
+        if (lookSet && priority == lookPriority && lookPitchOnly) {
+            lookYaw = yaw;
+            lookPitchOnly = false;
+            return;
+        }
         float keepPitch = lookPitch;
         if (lookSet && priority <= lookPriority) return;
         requestLook(yaw, keepPitch, priority, false);
@@ -351,6 +358,14 @@ public class BotAIContext {
     }
 
     public void requestLookPitch(float pitch, int priority) {
+        // Same the other way round: requestLookYaw + requestLookPitch at one
+        // priority used to drop the pitch, leaving bots looking at whatever
+        // pitch they last had (often straight up or down).
+        if (lookSet && priority == lookPriority && lookYawOnly) {
+            lookPitch = pitch;
+            lookYawOnly = false;
+            return;
+        }
         if (lookSet && priority <= lookPriority) return;
         requestLook(lookYaw, pitch, priority, false);
         lookPitchOnly = true;

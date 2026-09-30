@@ -34,10 +34,19 @@ public class ReachController {
     private static final double REPLAN_MOVE = 2.5;
     private static final int GIVE_BLOCKS = 64;
 
+    // Cells other bots have planned to build in or stand on, so several bots
+    // told to climb to the same player (or build up side by side) spread
+    // over different columns instead of fighting over one block.
+    private static final java.util.Map<Long, UUID> RESERVED = new java.util.HashMap<>();
+
     private final BotAIContext context;
 
     private UUID targetId;
     private World targetWorld;
+
+    // "build up": straight pillar on an assigned column.
+    private boolean towerMode;
+    private int towerX, towerZ, towerTopY;
 
     private List<ScaffoldPlanner.Step> plan;
     private int planIdx;
@@ -58,10 +67,53 @@ public class ReachController {
     }
 
     public boolean isActive() {
-        return targetId != null;
+        return targetId != null || towerMode;
+    }
+
+    // "everyone build up": walk to column (x, z) and pillar `height` blocks.
+    public boolean startTower(int x, int z, int height) {
+        stop();
+        towerMode = true;
+        towerX = x;
+        towerZ = z;
+        Player self = context.bot.getBukkitPlayer();
+        int baseY = self != null ? self.getLocation().getBlockY() : 64;
+        towerTopY = baseY + height;
+        context.standDownTicks = 0;
+        context.movementController.clearFormationOrder();
+        context.currentPath.clear();
+        context.pathNodeIndex = 0;
+        reserveColumn(x, z, baseY, towerTopY + 1);
+        gaveBlocks = false;
+        if (self != null && countBlocks(self) < height + 4) {
+            self.getInventory().addItem(new ItemStack(Material.COBBLESTONE, GIVE_BLOCKS));
+            context.packetBroadcaster.broadcastEquipment();
+            gaveBlocks = true;
+        }
+        return gaveBlocks;
+    }
+
+    private void reserveColumn(int x, int z, int fromY, int toY) {
+        for (int y = fromY; y <= toY; y++) RESERVED.put(key(x, y, z), context.bot.getUUID());
+    }
+
+    private void releaseReservations() {
+        UUID me = context.bot.getUUID();
+        RESERVED.values().removeIf(me::equals);
+    }
+
+    private boolean reservedByOther(int x, int y, int z) {
+        UUID who = RESERVED.get(key(x, y, z));
+        return who != null && !who.equals(context.bot.getUUID());
+    }
+
+    private static long key(int x, int y, int z) {
+        return ((long) (x & 0x3FFFFFF) << 38) | ((long) (y & 0xFFF) << 26) | (z & 0x3FFFFFF);
     }
 
     public String status() {
+        if (towerMode) return "building up at " + towerX + "," + towerZ + " to y=" + towerTopY
+                + (plan != null ? " step " + planIdx + "/" + plan.size() : "");
         if (targetId == null) return "idle";
         return "reaching " + targetId.toString().substring(0, 8)
                 + (plan != null ? " step " + planIdx + "/" + plan.size() : " no plan")
@@ -90,6 +142,8 @@ public class ReachController {
     public void stop() {
         targetId = null;
         targetWorld = null;
+        towerMode = false;
+        releaseReservations();
         plan = null;
         planIdx = 0;
         failures = 0;
@@ -99,6 +153,7 @@ public class ReachController {
     }
 
     public boolean handleReach(Player botPlayer) {
+        if (towerMode) return handleTower(botPlayer);
         if (targetId == null) return false;
         ServerPlayer handle = context.bot.getHandle();
         if (botPlayer == null || handle == null) { stop(); return false; }
@@ -163,6 +218,58 @@ public class ReachController {
         return true;
     }
 
+    private boolean handleTower(Player botPlayer) {
+        ServerPlayer handle = context.bot.getHandle();
+        if (botPlayer == null || handle == null) { stop(); return false; }
+        if (context.fleeing) return false;
+        if (placeDelay > 0) placeDelay--;
+        if (repathCooldown > 0) repathCooldown--;
+        if (++activeTicks > MAX_ACTIVE_TICKS) { stop(); return false; }
+        context.suppressSprint = true;
+
+        int fx = (int) Math.floor(handle.getX());
+        int fz = (int) Math.floor(handle.getZ());
+        int fy = (int) Math.floor(handle.getY() + 1.0e-3);
+
+        if (fy >= towerTopY && handle.onGround()) {
+            // Up top: stay put on the pillar.
+            stop();
+            context.forwardInput = 0f;
+            context.strafeInput = 0f;
+            return false;
+        }
+
+        if (plan == null) {
+            if (fx != towerX || fz != towerZ) {
+                Location col = new Location(botPlayer.getWorld(), towerX + 0.5, fy, towerZ + 0.5);
+                if (botPlayer.getLocation().distanceSquared(col) < 6 * 6) {
+                    double d = steerTo(handle, towerX + 0.5, towerZ + 0.5, 0.6f);
+                    if (handle.horizontalCollision && handle.onGround() && d > 0.3) {
+                        context.movementController.requestJump();
+                    }
+                } else {
+                    walkTowards(botPlayer, col);
+                }
+                return true;
+            }
+            if (!handle.onGround()) return true;
+            java.util.List<ScaffoldPlanner.Step> steps = new java.util.ArrayList<>();
+            for (int y = fy + 1; y <= towerTopY; y++) {
+                steps.add(new ScaffoldPlanner.Step(ScaffoldPlanner.Kind.PILLAR, towerX, y, towerZ));
+            }
+            plan = steps;
+            planIdx = 0;
+            stepTicks = 0;
+            airTicks = 0;
+            prevX = fx;
+            prevY = fy;
+            prevZ = fz;
+        }
+        executeStep(botPlayer, handle);
+        if (plan == null && failures >= MAX_PLAN_FAILURES) stop(); // ceiling / no blocks
+        return true;
+    }
+
     private void handOver(Player target) {
         stop();
         context.forcedTarget = target;
@@ -173,12 +280,17 @@ public class ReachController {
         int fx = (int) Math.floor(handle.getX());
         int fz = (int) Math.floor(handle.getZ());
         int fy = (int) Math.floor(handle.getY() + 1.0e-3);
-        Terrain terrain = new Terrain(botPlayer.getWorld(), tx, ty, tz);
+        Terrain terrain = new Terrain(botPlayer.getWorld(), tx, ty, tz, this::reservedByOther);
         if (!terrain.passable(fx, fy, fz)) fy++;
 
         List<ScaffoldPlanner.Step> p = ScaffoldPlanner.plan(terrain, fx, fy, fz, tx, ty, tz,
                 ARRIVE_DISTANCE, PLAN_PAD, PLAN_BUDGET);
         if (p == null) return false;
+        releaseReservations();
+        for (ScaffoldPlanner.Step st : p) {
+            RESERVED.put(key(st.x(), st.y(), st.z()), context.bot.getUUID());
+            if (st.placesBlock()) RESERVED.put(key(st.x(), st.y() - 1, st.z()), context.bot.getUUID());
+        }
         plan = p;
         planIdx = 0;
         stepTicks = 0;
@@ -408,16 +520,22 @@ public class ReachController {
 
     // Live world for the planner; the target's own body cells can't get a
     // block placed in them.
+    interface CellTest {
+        boolean test(int x, int y, int z);
+    }
+
     private static final class Terrain implements ScaffoldPlanner.Terrain {
         private final World w;
         private final int tx, ty, tz;
+        private final CellTest takenByOther;
         private final java.util.Map<Long, Material> cache = new java.util.HashMap<>();
 
-        Terrain(World w, int tx, int ty, int tz) {
+        Terrain(World w, int tx, int ty, int tz, CellTest takenByOther) {
             this.w = w;
             this.tx = tx;
             this.ty = ty;
             this.tz = tz;
+            this.takenByOther = takenByOther;
         }
 
         private Material at(int x, int y, int z) {
@@ -446,6 +564,7 @@ public class ReachController {
 
         @Override
         public boolean passable(int x, int y, int z) {
+            if (takenByOther.test(x, y, z)) return false; // another bot's route/pillar
             Material m = at(x, y, z);
             return m != null && !m.isSolid() && !danger(m) && m != Material.COBWEB;
         }
@@ -453,6 +572,7 @@ public class ReachController {
         @Override
         public boolean placeable(int x, int y, int z) {
             if (x == tx && z == tz && (y == ty || y == ty + 1)) return false;
+            if (takenByOther.test(x, y, z)) return false;
             Material m = at(x, y, z);
             return m != null && (m.isAir() || m == Material.WATER || m == Material.SHORT_GRASS
                     || m == Material.TALL_GRASS || m == Material.SNOW || m == Material.FERN

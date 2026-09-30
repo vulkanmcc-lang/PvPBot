@@ -39,7 +39,11 @@ public final class VoiceCommandParser {
         PILLAR_TO,  // walk / bridge / pillar up to a player, then fight them
         BOW,        // shoot a player with bows from range
         ARMOR_ON,
-        ARMOR_OFF
+        ARMOR_OFF,
+        TUNNEL,     // each bot digs its own tunnel the way the speaker faces
+        BUILD_UP,   // pillar straight up, each on its own column
+        LOOK_AT_ME,
+        PATH        // covered 3-wide bridge to the block the speaker looks at
     }
 
     public enum TargetKind { NONE, NAME, LOOK, NEAREST, FACTION }
@@ -92,7 +96,8 @@ public final class VoiceCommandParser {
     private static final List<Rule> RULES = List.of(
             rule(Intent.WORK_STOP,
                     "stop mining", "stop digging", "stop destroying", "stop blowing stuff up",
-                    "stop excavating", "stop working", "quit mining", "enough mining", "stop the mining"),
+                    "stop excavating", "stop working", "quit mining", "enough mining", "stop the mining",
+                    "stop building", "stop the bridge", "stop the path", "stop bridging"),
             rule(Intent.ARMOR_OFF,
                     "take your armor off", "take off your armor", "take the armor off", "take armor off",
                     "take off armor", "remove your armor", "remove armor", "unequip your armor",
@@ -111,6 +116,16 @@ public final class VoiceCommandParser {
                     "abort", "peace"),
             rule(Intent.ENGAGE,
                     "weapons free", "fight back", "free fire", "you can fight", "engage", "go wild"),
+            rule(Intent.PATH,
+                    "make a path there", "make a path over there", "make a path", "build a path there",
+                    "build a path", "make a bridge there", "make a bridge", "build a bridge there",
+                    "build a bridge", "bridge over there", "bridge there", "bridge it", "path there",
+                    "pave a path", "make a road", "build a road"),
+            rule(Intent.TUNNEL,
+                    "tunnel this way", "tunnel that way", "tunnel over there", "tunnel forward",
+                    "tunnel ahead", "tunnel through", "tunnel here", "dig a tunnel", "dig tunnels",
+                    "dig this way", "dig that way", "dig forward", "mine this way", "mine that way",
+                    "mine forward", "start tunneling", "start tunnelling", "tunnel"),
             rule(Intent.DESTROY,
                     "destroy the area", "destroy this area", "destroy that area", "destroy everything",
                     "destroy it all", "destroy this", "destroy it", "destroy area", "destroy here",
@@ -132,6 +147,8 @@ public final class VoiceCommandParser {
                     "go behind me", "get behind me", "stay behind me", "fall in behind me", "line up behind me",
                     "form up behind me", "get in formation", "form up", "fall in", "line up", "formation",
                     "behind me"),
+            rule(Intent.LOOK_AT_ME,
+                    "look at me", "look over here", "look here", "face me", "eyes on me", "turn around"),
             rule(Intent.ALERT,
                     "keep your eyes open", "keep your eyes peeled", "eyes open", "watch out", "look out",
                     "behind you", "theyre coming", "they are coming", "here they come", "incoming",
@@ -153,6 +170,9 @@ public final class VoiceCommandParser {
                     "pillar up to {p}", "pillar to {p}", "pillar up at {p}", "tower up to {p}",
                     "tower to {p}", "build up to {p}", "climb up to {p}", "climb to {p}",
                     "go up to {p}", "get up to {p}", "get to {p}", "reach {p}"),
+            rule(Intent.BUILD_UP,
+                    "build up", "build upwards", "pillar up", "pillar upwards", "tower up", "build a tower",
+                    "build towers", "go up", "climb up", "get up high", "get up there", "get high"),
             rule(Intent.BOW,
                     "use your bows on {p}", "use bows on {p}", "bows on {p}", "bow on {p}",
                     "shoot at {p}", "shoot {p}", "bow {p}", "snipe {p}", "arrow {p}", "fire at {p}"),
@@ -665,7 +685,11 @@ public final class VoiceCommandParser {
             Map.entry("pillow", "pillar"), Map.entry("pillar's", "pillar"), Map.entry("dug", "dig"),
             Map.entry("digging", "dig"), Map.entry("stopped", "stop"), Map.entry("stops", "stop"),
             Map.entry("focused", "focus"), Map.entry("targeted", "target"), Map.entry("targets", "target"),
-            Map.entry("comes", "come"), Map.entry("came", "come"), Map.entry("hear", "here"));
+            Map.entry("comes", "come"), Map.entry("came", "come"), Map.entry("hear", "here"),
+            Map.entry("tunnels", "tunnel"), Map.entry("tunneling", "tunnel"), Map.entry("tunnelling", "tunnel"),
+            Map.entry("funnel", "tunnel"), Map.entry("towers", "tower"), Map.entry("built", "build"),
+            Map.entry("building", "build"), Map.entry("paths", "path"), Map.entry("bridges", "bridge"),
+            Map.entry("pat", "path"), Map.entry("pass", "path"), Map.entry("bridging", "bridge"));
 
     static boolean wordMatches(String heard, String want) {
         if (heard.equals(want)) return true;
