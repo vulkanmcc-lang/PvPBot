@@ -57,5 +57,8 @@ with a command word) are sent to the server, as text.
 ./gradlew build
 ```
 
+Building needs a **Java 25** JDK (current Fabric Loom requires it to run
+Gradle); the mod itself targets Java 21 like Minecraft 1.21.11.
+
 CI picks the newest Loader / Yarn / Fabric API / Loom for
 `minecraft_version` in `gradle.properties` automatically.

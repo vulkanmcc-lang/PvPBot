@@ -61,10 +61,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Current Loom needs Gradle itself to run on Java 25; the mod is still
+      # compiled for Java 21 (options.release), which is what 1.21.11 runs on.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
 
       - uses: gradle/actions/setup-gradle@v4
 
