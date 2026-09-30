@@ -388,6 +388,16 @@ public final class ExcavationJob {
         return fresh.size();
     }
 
+    // Cells that are actually solid right now (a route through open air is
+    // no dig at all).
+    public int breakableLeft() {
+        int n = 0;
+        for (Cell c : cells) {
+            if (!c.done && breakable(world.getBlockAt(c.x, c.y, c.z).getType())) n++;
+        }
+        return n;
+    }
+
     // Blocks still to dig in this bot's lane.
     public int laneLeft(UUID bot) {
         Integer lane = laneOf.get(bot);

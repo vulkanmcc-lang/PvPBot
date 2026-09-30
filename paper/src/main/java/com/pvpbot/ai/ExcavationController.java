@@ -165,8 +165,15 @@ public class ExcavationController {
         if (t == null || t.getWorld() != botPlayer.getWorld()) return false;
         if (context.tickCounter - context.lastDamageTime < 40 && context.lastDamager == t) return true;
         double d = t.getLocation().distance(botPlayer.getLocation());
-        if (d <= 3.5) return true;
-        return d <= 12.0 && context.combatController.hasLineOfSight(botPlayer, t);
+        boolean sees = context.combatController.hasLineOfSight(botPlayer, t);
+        // Close AND nothing between us: swing. Close with a block in between
+        // (they're in a 1-wide gap behind it): that block goes first.
+        if (d <= context.settings.getReach() + 0.5) return sees;
+        // Digging our way to them: seeing them (through a 1-wide gap, a
+        // window, over a wall) doesn't mean we can get there - keep digging
+        // until we're close enough to swing.
+        if (job != null && job.mode == ExcavationJob.Mode.DIG_TO) return false;
+        return d <= 12.0 && sees;
     }
 
     // ---------------------------------------------------------------------
@@ -187,7 +194,8 @@ public class ExcavationController {
         java.util.List<java.util.UUID> crew = java.util.List.of(context.bot.getUUID());
         ExcavationJob j = ExcavationJob.startDigTo(context.bot.getUUID(), crew,
                 java.util.List.of(botPlayer.getLocation()), target.getLocation(), target.getUniqueId());
-        if (j.total() == 0) {
+        // Only worth it if there's actually something in the way.
+        if (j.breakableLeft() == 0) {
             j.cancel();
             return false;
         }
@@ -214,8 +222,8 @@ public class ExcavationController {
             return false;
         }
         Location me = botPlayer.getLocation();
-        if (me.distance(t.getLocation()) <= ARRIVE_DISTANCE
-                || (me.distance(t.getLocation()) <= 6.0 && context.combatController.hasLineOfSight(botPlayer, t))) {
+        if (me.distance(t.getLocation()) <= Math.max(ARRIVE_DISTANCE, context.settings.getReach())
+                && context.combatController.hasLineOfSight(botPlayer, t)) {
             // Through. An enemy gets fought from here; a friend just got
             // company.
             abort();
@@ -319,6 +327,12 @@ public class ExcavationController {
             }
             cell = job.claim(context.bot.getUUID(), botPlayer, b -> canBreakCached(botPlayer, b));
             stallTicks = 0;
+            if (cell == null && job.chase) {
+                // Nothing left in the way on this route: back to fighting.
+                abort();
+                context.chaseCooldown = Math.max(context.chaseCooldown, 40);
+                return false;
+            }
             if (cell == null) {
                 claimCooldown = CLAIM_RETRY_TICKS;
                 context.forwardInput = 0f;

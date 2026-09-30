@@ -784,7 +784,7 @@ public class BotAI {
     // level or below; if even that isn't possible, give up on it for a
     // while instead of standing there jumping at the floor. Never touches a
     // bot that's busy with an order (walk, hold, dig, build, climb, bow).
-    private static final int UNREACHABLE_DIG_TICKS = 60;
+    private static final int UNREACHABLE_DIG_TICKS = 40;
     private static final int UNREACHABLE_DROP_TICKS = 200;
     private static final int IGNORE_TICKS = 400;
 
@@ -803,7 +803,9 @@ public class BotAI {
         }
         if ((context.tickCounter % 5) != 0) return;
         double d = botPlayer.getLocation().distance(t.getLocation());
-        if (d <= context.settings.getReach() + 1.5 || d < context.unreachableBest - 1.0) {
+        boolean inSwing = d <= context.settings.getReach() + 1.5
+                && context.combatController.hasLineOfSight(botPlayer, t);
+        if (inSwing || d < context.unreachableBest - 1.0) {
             context.unreachableBest = Math.min(context.unreachableBest, d);
             context.unreachableTicks = 0;
             return;
@@ -811,10 +813,11 @@ public class BotAI {
         context.unreachableTicks += 5;
         if (context.unreachableTicks < UNREACHABLE_DIG_TICKS) return;
 
-        boolean sees = context.combatController.hasLineOfSight(botPlayer, t);
+        // Getting nowhere for 2 s (seeing them or not - a 1-wide gap, a
+        // fence, glass, a wall with them right behind it): dig through.
         double rise = t.getLocation().getY() - botPlayer.getLocation().getY();
-        if (!sees && rise <= 2.5 && d <= 40.0 && context.chaseCooldown <= 0) {
-            context.chaseCooldown = 100;
+        if (rise <= 2.5 && d <= 40.0 && context.chaseCooldown <= 0) {
+            context.chaseCooldown = 40;
             if (context.excavationController.startChase(botPlayer, t)) {
                 context.unreachableTicks = 0;
                 context.unreachableBest = Double.MAX_VALUE;
