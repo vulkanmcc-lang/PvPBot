@@ -603,6 +603,22 @@ public class CombatController {
             }
         }
 
+        // The axe is for breaking shields (and the stun slam): once the target
+        // isn't blocking any more, back to the sword - otherwise one shield
+        // break left the bot axe-mained for the rest of the fight.
+        if (InventoryController.isAxe(botPlayer.getInventory().getItemInMainHand())
+                && context.maceStunSlamPhase == 0
+                && !InventoryController.isBlockingWithShield(context.target)) {
+            int sword = context.inventoryController.findBestSwordSlot(botPlayer);
+            if (sword >= 0 && sword <= 8 && botPlayer.getInventory().getHeldItemSlot() != sword) {
+                botPlayer.getInventory().setHeldItemSlot(sword);
+                context.packetBroadcaster.broadcastEquipment();
+                context.lastAttackGate = "swapping axe -> sword";
+                resetCrit();
+                return;
+            }
+        }
+
         if (isBotStuckInCobweb(botPlayer)) { context.lastAttackGate = "stuck in cobweb"; resetCrit(); return; }
         if (context.bridging) { context.lastAttackGate = "bridging"; resetCrit(); return; }
 

@@ -489,7 +489,9 @@ public class MaceController {
             }
             case ALIGN -> {
                 aimAtTarget(handle);
-                if (elytraPhaseTicks < ELYTRA_ALIGN_TICKS) return;
+                // Still going up (the Wind Burst bounce, or the climb's
+                // momentum): wait for the top before diving.
+                if (elytraPhaseTicks < ELYTRA_ALIGN_TICKS || handle.getDeltaMovement().y > 0.05) return;
 
                 if (!context.inventoryController.equipElytraForMace(botPlayer)) {
                     cancel(botPlayer);
@@ -862,22 +864,11 @@ public class MaceController {
 
                 boolean lastChance = aboutToLand(botPlayer);
 
-                if (!lastChance && slamWaitTicks < STUN_SLAM_MAX_WAIT) {
-                    ServerPlayer invulTarget = null;
-                    try {
-                        invulTarget = ((org.bukkit.craftbukkit.entity.CraftPlayer)
-                                context.target).getHandle();
-                    } catch (Throwable ignored) {
-                    }
-                    if (invulTarget != null && invulTarget.invulnerableTime > 10) {
-                        slamWaitTicks++;
-                        stunGate = "P2 waiting out i-frames ("
-                                + invulTarget.invulnerableTime + ")";
-                        context.maceStunSlamPhaseTicks = 1;
-                        return;
-                    }
-                }
-
+                // No waiting out the target's hurt-cooldown here: the axe hit
+                // landed on a raised shield, so it did 0 damage - and a hit
+                // during the cooldown still deals everything above the last
+                // hit's damage, i.e. the whole smash. Waiting only let the bot
+                // land first and lose the smash.
                 if (!canSmash && !smashHandle.onGround()
                         && slamWaitTicks < STUN_SLAM_MAX_WAIT) {
                     slamWaitTicks++;
@@ -1108,10 +1099,15 @@ public class MaceController {
                 && hasRocket(botPlayer)
                 && context.inventoryController.findElytraSlot(botPlayer) != -1;
 
-        if (gap > ELYTRA_RELEASE_RANGE && canFly) {
+        // Wind Burst just threw us up: with an elytra and rockets, ride that
+        // height - at the top of the bounce pop the elytra, rocket back down
+        // at them, let go close in and smash again. Without, just fall on
+        // them again.
+        if (canFly) {
             restoreElytra(botPlayer);
             activeLaunch = Launch.ELYTRA;
             elytraPhase = ElytraPhase.ALIGN;
+            context.maceWindupTicks = ELYTRA_ATTEMPT_TIMEOUT;
         } else {
             activeLaunch = Launch.HEIGHT;
             elytraPhase = ElytraPhase.NONE;
