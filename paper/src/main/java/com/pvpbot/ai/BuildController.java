@@ -251,7 +251,7 @@ public class BuildController {
         }
 
         if (plan != null) {
-            if (target(task).getBlockData().matches(task.data)) {
+            if (isPlaced(target(task), task)) {
                 plan = null;
                 setSneak(false);
             } else {
@@ -268,7 +268,7 @@ public class BuildController {
         double dz = task.z + 0.5 - botLoc.getZ();
         double distSq = dx * dx + dy * dy + dz * dz;
 
-        if (target.getBlockData().matches(task.data)) {
+        if (isPlaced(target, task)) {
             job.complete(task);
             task = null;
             phase = Phase.IDLE;
@@ -339,6 +339,20 @@ public class BuildController {
         phase = Phase.PLACE;
         placeBlock(botPlayer, handle, target);
         return true;
+    }
+
+    // A cell counts as built once it holds the right block. Its exact state
+    // may differ from the schematic's - fences, walls, panes and stairs
+    // reshape to connect to their neighbours, grass turns to dirt under a
+    // block, leaves track their distance - and comparing full states made
+    // bots mine their own finished blocks to "fix" them, forever.
+    private static boolean isPlaced(Block b, BuildJob.Task t) {
+        if (b.getBlockData().matches(t.data)) return true;
+        Material have = b.getType(), want = t.data.getMaterial();
+        if (have == want) return true;
+        // Grass/mycelium/podzol placed under something turn into dirt.
+        return want.name().endsWith("GRASS_BLOCK") && have == Material.DIRT
+                || want == Material.FARMLAND && have == Material.DIRT;
     }
 
     private boolean selfOccupies(ServerPlayer handle, BuildJob.Task t) {
@@ -432,6 +446,42 @@ public class BuildController {
         return (edge - origin) / dir;
     }
 
+    private static final double PILLAR_RANGE = 3.2;
+    private double pillarBaseY = Double.NaN;
+
+    // Jump and put a scaffold block under ourselves, again and again, until
+    // the task is within reach. False if we can't pillar from this spot (it's
+    // part of the build, right under the task, or there's a roof).
+    private boolean directPillar(Player botPlayer, ServerPlayer handle, BuildJob.Task t) {
+        int fx = (int) Math.floor(handle.getX()), fz = (int) Math.floor(handle.getZ());
+        int fy = feetCellY(handle);
+        if ((fx == t.x && fz == t.z) || job.isBuildCell(fx, fy, fz)) return false;
+        if (job.world.getBlockAt(fx, fy + 2, fz).getType().isSolid()) return false;
+
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
+        context.suppressSprint = true;
+        phase = Phase.SCAFFOLD;
+        context.movementController.easePitchTo(80f);
+
+        if (handle.onGround()) {
+            pillarBaseY = handle.getY();
+            if (pillarPlaceDelay <= 0) context.movementController.requestJump();
+            return true;
+        }
+        if (Double.isNaN(pillarBaseY)) return true;
+        int baseCell = (int) Math.floor(pillarBaseY + 1.0e-3);
+        Block under = job.world.getBlockAt(fx, baseCell, fz);
+        if (handle.getY() - pillarBaseY >= 0.95 && handle.getDeltaMovement().y <= 0.08
+                && !under.getType().isSolid()) {
+            if (placeScaffold(botPlayer, handle, under, true, fx, baseCell, fz)) {
+                pillarPlaceDelay = 4;
+                pillarBaseY = Double.NaN;
+            }
+        }
+        return true;
+    }
+
     private void jumpAndPlace(Player botPlayer, ServerPlayer handle, Block target) {
         if (handle.getY() >= task.y + 0.9) {
             placeBlock(botPlayer, handle, target);
@@ -507,6 +557,14 @@ public class BuildController {
         // already stalled: plan a route that may bridge out and/or pillar up.
         boolean mustClimb = t.y - feetY >= 3;
         boolean aerialSpot = dest.getY() - feetY > 1.5 || !hasFloor(dest);
+
+        // Right under / next to a block that's out of reach overhead: climb.
+        // The route planner gets the first go (it can bridge and step too);
+        // if it finds nothing, just pillar straight up here.
+        if (t.y - feetY >= 2 && horizSq <= PILLAR_RANGE * PILLAR_RANGE) {
+            if (planCooldown <= 0 && handle.onGround() && tryStartPlan(botPlayer, handle)) return;
+            if (directPillar(botPlayer, handle, t)) return;
+        }
         boolean grinding = context.wallBumpTicks > 8;
         boolean near = horizSq < SCAFFOLD_RANGE * SCAFFOLD_RANGE;
         if (near && (mustClimb || aerialSpot || grinding || failedApproaches >= 1 || forcePath)
@@ -1270,6 +1328,13 @@ public class BuildController {
         return "_PICKAXE";
     }
 
+    // Survival break time, the way vanilla works it out: the right tool's
+    // speed (+ Efficiency), Haste, a 5x slowdown in the air or in water, and
+    // the wrong-tool penalty for blocks that need one - with a floor so even
+    // a god pickaxe visibly breaks things (scaffold included) instead of
+    // making them pop.
+    private static final int MIN_BREAK_TICKS = 6;
+
     private int computeBreakTicks(Player botPlayer, Block block) {
         double hardness;
         try {
@@ -1278,20 +1343,25 @@ public class BuildController {
             hardness = 1.5;
         }
         if (hardness < 0) return 200;
-        if (hardness == 0) return 2;
+        if (hardness == 0) return MIN_BREAK_TICKS;
 
         double speed = 1.0;
         ItemStack hand = botPlayer.getInventory().getItemInMainHand();
-        if (hand != null) {
+        boolean preferred = false;
+        if (hand != null && !hand.getType().isAir()) {
+            try {
+                preferred = block.isPreferredTool(hand);
+            } catch (Throwable ignored) {
+            }
             String n = hand.getType().name();
-            String wanted = preferredToolSuffix(block.getType());
-            if (n.endsWith(wanted)) {
+            if (preferred) {
                 if (n.startsWith("WOODEN")) speed = 2.0;
                 else if (n.startsWith("STONE")) speed = 4.0;
                 else if (n.startsWith("IRON")) speed = 6.0;
                 else if (n.startsWith("DIAMOND")) speed = 8.0;
                 else if (n.startsWith("NETHERITE")) speed = 9.0;
                 else if (n.startsWith("GOLDEN")) speed = 12.0;
+                else if (n.equals("SHEARS")) speed = 2.0;
             }
             try {
                 int eff = hand.getEnchantmentLevel(Enchantment.EFFICIENCY);
@@ -1305,9 +1375,18 @@ public class BuildController {
             if (haste != null) speed *= 1.0 + 0.2 * (haste.getAmplifier() + 1);
         } catch (Throwable ignored) {
         }
+        if (!botPlayer.isOnGround()) speed /= 5.0;
+        if (botPlayer.isInWater()) speed /= 5.0;
 
-        int ticks = (int) Math.ceil(30.0 * hardness / Math.max(0.01, speed));
-        return Math.max(2, Math.min(ticks, 200));
+        boolean needsTool;
+        try {
+            needsTool = block.getBlockData().requiresCorrectToolForDrops();
+        } catch (Throwable t) {
+            needsTool = false;
+        }
+        double divisor = (!needsTool || preferred) ? 30.0 : 100.0;
+        int ticks = (int) Math.ceil(divisor * hardness / Math.max(0.01, speed));
+        return Math.max(MIN_BREAK_TICKS, Math.min(ticks, 200));
     }
 
     private void sendDestroyStage(Block block, int stage) {
