@@ -182,7 +182,7 @@ public class BotAIContext {
     int idleStuckTicks = 0;
 
     Player lastDamager = null;
-    int lastDamageTime = 0;
+    public int lastDamageTime = 0;
     static final int DAMAGE_MEMORY_TICKS = 40;
 
     Player assistTarget = null;
@@ -274,6 +274,10 @@ public class BotAIContext {
     public int chaseCooldown = 0;
     public Player ignoredTarget = null;
     public int ignoredUntil = 0;
+    // Dropped for running past the leader leash: skipped by targeting for a
+    // while so it doesn't chase straight back out.
+    public Player leashDroppedTarget = null;
+    public int leashDroppedUntil = 0;
 
     // Commander order: walk to the speaker, nod, then go for the target.
     public java.util.UUID commanderSpeaker = null;

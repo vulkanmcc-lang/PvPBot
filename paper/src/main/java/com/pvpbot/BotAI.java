@@ -739,6 +739,11 @@ public class BotAI {
         if (context.target == null) return;
         if (leader == null) return;
 
+        Player target = context.target;
+        // An explicit order ("attack X", the commander, /pvpbot target) is
+        // never called off by the leash or by the leader running.
+        if (target == context.forcedTarget) return;
+
         boolean leaderFleeing = isLeaderFleeing(leader);
 
         boolean crossWorld = leader.getWorld() != botPlayer.getWorld();
@@ -747,26 +752,60 @@ public class BotAI {
                 : leader.getLocation().distance(botPlayer.getLocation());
 
         double targetToLeader = Double.MAX_VALUE;
-        if (!crossWorld && context.target.getWorld() == leader.getWorld()) {
-            targetToLeader = context.target.getLocation().distance(leader.getLocation());
+        if (!crossWorld && target.getWorld() == leader.getWorld()) {
+            targetToLeader = target.getLocation().distance(leader.getLocation());
         }
 
-        boolean strayed = botToLeader > leaderLeash()
-                && targetToLeader > leaderLeash();
+        double leash = chaseLeash();
+        boolean strayed = botToLeader > leash && targetToLeader > leash;
 
-        if (strayed && !leaderFleeing && context.target.getWorld() == botPlayer.getWorld()
-                && botPlayer.getLocation().distance(context.target.getLocation())
-                <= context.settings.getReach() + 1.0) {
-            return;
+        boolean sameWorld = target.getWorld() == botPlayer.getWorld();
+        double toTarget = sameWorld
+                ? botPlayer.getLocation().distance(target.getLocation())
+                : Double.MAX_VALUE;
+
+        if (strayed && !leaderFleeing) {
+            // Mid-fight: trading hits, or the faction was attacked by this
+            // player - finish it instead of turning our back on them.
+            boolean defendingFaction = context.factionCombatTicks > 0
+                    && target == context.factionCombatTarget;
+            boolean trading = context.tickCounter - context.lastLandedAttackTick < ENGAGED_TICKS
+                    || context.tickCounter - context.lastDamageTime < ENGAGED_TICKS;
+            if (toTarget <= context.settings.getReach() + 1.0
+                    || defendingFaction
+                    || (trading && toTarget <= ENGAGED_RANGE)) {
+                return;
+            }
         }
 
         if (leaderFleeing || strayed) {
+            if (strayed && !leaderFleeing) {
+                // Don't re-pick the same player the moment the regroup ends
+                // (that's the run out / get yanked back loop) - unless they
+                // come at us, which clears this in notifyDamage.
+                context.leashDroppedTarget = target;
+                context.leashDroppedUntil = context.tickCounter + LEASH_DROP_TICKS;
+            }
             context.regroupTicks = 100;
             context.target = null;
             context.critPhase = BotAIContext.CritPhase.IDLE;
             context.currentPath.clear();
             context.pathNodeIndex = 0;
         }
+    }
+
+    private static final int ENGAGED_TICKS = 60;
+    private static final double ENGAGED_RANGE = 16.0;
+    private static final int LEASH_DROP_TICKS = 200;
+
+    // How far a bot may run from its leader for a fight. The leash setting
+    // is only a floor here: targeting picks fights out to the target range
+    // (and keeps them to 1.25x that), so a leash shorter than that made bots
+    // lock onto someone 30-40 blocks out, run 24, get yanked home, re-lock
+    // on the same player and yo-yo forever without ever engaging.
+    private double chaseLeash() {
+        double range = context.settings.getTargetRange();
+        return Math.max(leaderLeash(), range * 1.25 + 8.0);
     }
 
     private boolean isLeaderFleeing(Player leader) {
