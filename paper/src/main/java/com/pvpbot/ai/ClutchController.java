@@ -83,7 +83,7 @@ public class ClutchController {
         if (w.getEnvironment() == World.Environment.NETHER) return false;
 
         int slot = context.inventoryController.findItemSlot(botPlayer, Material.WATER_BUCKET);
-        if (slot < 0) return false;
+        if (slot < 0 || slot > 8) return false;
 
         Block target = w.getBlockAt(loc.getBlockX(), floorY + 1, loc.getBlockZ());
         if (!target.getType().isAir()) return false;
@@ -91,7 +91,7 @@ public class ClutchController {
         Block support = w.getBlockAt(loc.getBlockX(), floorY, loc.getBlockZ());
         if (support.getType().isAir()) return false;
 
-        if (slot <= 8) botPlayer.getInventory().setHeldItemSlot(slot);
+        botPlayer.getInventory().setHeldItemSlot(slot);
         aimStraightDown(handle);
         handle.swing(InteractionHand.MAIN_HAND, true);
         context.packetBroadcaster.broadcastAnimation(handle, 0);
@@ -149,6 +149,10 @@ public class ClutchController {
         context.wallBumpTicks = 0;
         context.avoidTicks = 0;
         hopCooldown = HOP_COOLDOWN;
+    }
+
+    private void aimStraightDown(ServerPlayer handle) {
+        VanillaUse.face(context, handle, handle.getYRot(), 90.0f);
     }
 
     private boolean launchWindCharge(Player botPlayer, int slot, ServerPlayer handle) {
