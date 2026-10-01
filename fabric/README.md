@@ -7,13 +7,19 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 1. Fabric Loader for Minecraft 1.21.11, plus **Fabric API** and **Simple Voice Chat**.
 2. Put `pvpbot-voicelink-*.jar` in `mods/`.
 3. In game, run `/voicelink setup` once. It downloads the offline English
-   speech model (~40 MB, [Vosk](https://alphacephei.com/vosk/models)) into
-   `config/pvpbot-voicelink/models/`.
+   speech model ([Vosk](https://alphacephei.com/vosk/models)) into
+   `config/pvpbot-voicelink/models/`. The default is the large model
+   (~1.8 GB, most accurate); `/voicelink model` lists the others and
+   `/voicelink model small|medium|large|gigaspeech` switches (downloading it
+   if needed - you keep using the old one until it's done). Vosk runs on the
+   CPU, so any modern desktop handles the big models in real time.
 4. Join a server running the PvPBot plugin. Voice orders only work for
    **faction leaders** (`/pvpbot faction leader add <you> <faction>`) and only
    reach the bots of the factions you lead. Everyone else is ignored.
 
-`/voicelink` shows status, `/voicelink on|off` toggles it.
+`/voicelink` shows status, `/voicelink on|off` toggles it. Voice orders work
+silently - no chat or action-bar read-outs (server admins can turn those on
+for debugging with `voice-feedback: true` in the PvPBot config).
 
 ## What you can say
 
@@ -72,8 +78,8 @@ just "nexar"), `Steve123` as "steve", `xDarkKnightx` as "dark knight",
 server fuzzy-matches what you said against the players and bots online.
 
 Start with "everyone" / "guys" / a faction name, or open the sentence with
-the command. If you address the bots and nothing happens, the action bar
-shows what the speech recogniser heard, so you can see which word it got wrong. Single words like "stop" or "wait" need an address
+the command. (With `voice-feedback: true` on the server, the action bar shows
+what was heard when nothing matched.) Single words like "stop" or "wait" need an address
 ("everyone stop") so normal talk doesn't trigger them.
 
 ## Privacy

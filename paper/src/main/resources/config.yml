@@ -2,6 +2,10 @@ use-vanilla-entity-tracker: true
 skin-sources: []
 factions: {}
 prevent-faction-friendly-fire: true
+
+# Voice orders (PvPBot Voice Link mod): show what was understood / what went
+# wrong on the action bar. A debugging aid - off means bots just obey.
+voice-feedback: false
 harvest-player-skins: false
 
 # ──────────────────────────────────────────────────────────────────────────────

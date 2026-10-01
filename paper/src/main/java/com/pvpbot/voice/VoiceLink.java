@@ -212,7 +212,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             // silent.
             if (VoiceCommandParser.mentionsBots(transcript, manager.getFactionNames(), ledNames)) {
                 lastCommand.put(speaker.getUniqueId(), now);
-                speaker.sendActionBar(Component.text("🎙 didn't catch an order in: \"" + transcript + "\"",
+                feedback(speaker, Component.text("🎙 didn't catch an order in: \"" + transcript + "\"",
                         NamedTextColor.YELLOW));
             }
             return;
@@ -919,7 +919,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             }
             Player sp = Bukkit.getPlayer(speaker);
             if (sp != null) {
-                sp.sendActionBar(Component.text("🎙 " + who + " → room cleared, building the " + name
+                feedback(sp, Component.text("🎙 " + who + " → room cleared, building the " + name
                         + " (" + build.total() + " blocks)", NamedTextColor.GREEN));
             }
         }
@@ -930,7 +930,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             if (clear != null && !clear.isFinished()) clear.cancel();
             Player sp = Bukkit.getPlayer(speaker);
             if (finished && sp != null) {
-                sp.sendActionBar(Component.text("🎙 " + who + " → the " + name + " is done", NamedTextColor.GREEN));
+                feedback(sp, Component.text("🎙 " + who + " → the " + name + " is done", NamedTextColor.GREEN));
             }
         }
     }
@@ -1396,11 +1396,20 @@ public final class VoiceLink implements PluginMessageListener, Listener {
     }
 
     // Feedback goes to the action bar only - voice orders shouldn't flood chat.
+    // Voice orders work silently. The action-bar read-outs (what was
+    // understood, what went wrong) are a debugging aid, off unless
+    // voice-feedback: true is set in config.yml.
     private static void ok(Player speaker, String heard, String what) {
-        speaker.sendActionBar(Component.text("🎙 " + what, NamedTextColor.GREEN));
+        feedback(speaker, Component.text("🎙 " + what, NamedTextColor.GREEN));
     }
 
     private static void fail(Player speaker, String heard, String why) {
-        speaker.sendActionBar(Component.text("🎙 " + why, NamedTextColor.RED));
+        feedback(speaker, Component.text("🎙 " + why, NamedTextColor.RED));
+    }
+
+    private static void feedback(Player speaker, Component line) {
+        if (speaker == null) return;
+        if (!PvPBotPlugin.getInstance().getConfig().getBoolean("voice-feedback", false)) return;
+        speaker.sendActionBar(line);
     }
 }

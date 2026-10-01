@@ -94,7 +94,18 @@ public final class VoiceLinkClient implements ClientModInitializer {
                         .then(ClientCommandManager.literal("status").executes(VoiceLinkClient::status))
                         .then(ClientCommandManager.literal("on").executes(ctx -> setEnabled(ctx, true)))
                         .then(ClientCommandManager.literal("off").executes(ctx -> setEnabled(ctx, false)))
-                        .then(ClientCommandManager.literal("setup").executes(VoiceLinkClient::setup))));
+                        .then(ClientCommandManager.literal("setup").executes(VoiceLinkClient::setup))
+                        .then(ClientCommandManager.literal("model")
+                                .executes(VoiceLinkClient::listModels)
+                                .then(ClientCommandManager.argument("size",
+                                                com.mojang.brigadier.arguments.StringArgumentType.word())
+                                        .suggests((ctx, b) -> {
+                                            for (VoiceLinkConfig.ModelChoice c : VoiceLinkConfig.ModelChoice.values()) {
+                                                b.suggest(c.name().toLowerCase(Locale.ROOT));
+                                            }
+                                            return b.buildFuture();
+                                        })
+                                        .executes(VoiceLinkClient::chooseModel)))));
 
         if (config.enabled) startEngineAsync();
     }
@@ -112,13 +123,7 @@ public final class VoiceLinkClient implements ClientModInitializer {
         client.execute(() -> {
             if (!addressesBots(text)) return;
             if (client.player == null) return;
-            if (!ClientPlayNetworking.canSend(VoiceCommandPayload.ID)) {
-                if (config.showHeard) {
-                    overlay(Text.literal("🎙 \"" + text + "\" - this server doesn't have PvPBot voice commands")
-                            .formatted(Formatting.GRAY));
-                }
-                return;
-            }
+            if (!ClientPlayNetworking.canSend(VoiceCommandPayload.ID)) return;
             String clipped = text.length() > VoiceCommandPayload.MAX_LENGTH
                     ? text.substring(0, VoiceCommandPayload.MAX_LENGTH) : text;
             ClientPlayNetworking.send(new VoiceCommandPayload(clipped));
@@ -155,21 +160,64 @@ public final class VoiceLinkClient implements ClientModInitializer {
     // ---------------------------------------------------------------------
 
     private static void startEngineAsync() {
-        Thread t = new Thread(() -> engine.load(config.modelDir()), "PvPBot-VoiceLink-Load");
+        Thread t = new Thread(() -> engine.load(modelToLoad()), "PvPBot-VoiceLink-Load");
         t.setDaemon(true);
         t.start();
     }
 
+    // The chosen model if it's downloaded; otherwise the best one that is
+    // (so switching to a bigger model never leaves you without voice orders
+    // until the download is done).
+    private static java.nio.file.Path modelToLoad() {
+        java.nio.file.Path chosen = config.modelDir();
+        if (java.nio.file.Files.isDirectory(chosen)) return chosen;
+        VoiceLinkConfig.ModelChoice[] best = VoiceLinkConfig.ModelChoice.values();
+        for (int i = best.length - 1; i >= 0; i--) {
+            java.nio.file.Path p = VoiceLinkConfig.modelsDir().resolve(best[i].folder);
+            if (java.nio.file.Files.isDirectory(p)) return p;
+        }
+        return chosen;
+    }
+
+    private static int listModels(CommandContext<FabricClientCommandSource> ctx) {
+        FabricClientCommandSource src = ctx.getSource();
+        src.sendFeedback(Text.literal("Speech models (current: " + config.model + ")").formatted(Formatting.GOLD));
+        for (VoiceLinkConfig.ModelChoice c : VoiceLinkConfig.ModelChoice.values()) {
+            boolean have = java.nio.file.Files.isDirectory(VoiceLinkConfig.modelsDir().resolve(c.folder));
+            src.sendFeedback(Text.literal(" " + c.name().toLowerCase(Locale.ROOT) + " - " + c.size + ", " + c.blurb
+                    + (have ? " [downloaded]" : "")).formatted(have ? Formatting.GREEN : Formatting.GRAY));
+        }
+        src.sendFeedback(Text.literal(" /voicelink model <name> to switch (downloads it if needed)")
+                .formatted(Formatting.DARK_GRAY));
+        return 1;
+    }
+
+    private static int chooseModel(CommandContext<FabricClientCommandSource> ctx) {
+        String name = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "size");
+        VoiceLinkConfig.ModelChoice c = VoiceLinkConfig.ModelChoice.byName(name);
+        if (c == null) {
+            ctx.getSource().sendFeedback(Text.literal("Unknown model '" + name
+                    + "' - small, medium, large or gigaspeech").formatted(Formatting.RED));
+            return 0;
+        }
+        config.choose(c);
+        if (java.nio.file.Files.isDirectory(config.modelDir())) {
+            ctx.getSource().sendFeedback(Text.literal("Switched to the " + c.name().toLowerCase(Locale.ROOT)
+                    + " speech model.").formatted(Formatting.GREEN));
+            if (config.enabled) startEngineAsync();
+            return 1;
+        }
+        return setup(ctx);
+    }
+
+    // Silent when everything works; only speaks up when voice orders can't
+    // work (no speech model yet) so you know to run /voicelink setup.
     private static void announceOnJoin() {
         if (!config.enabled) return;
         if (!ClientPlayNetworking.canSend(VoiceCommandPayload.ID)) return;
-        if (!engine.ready()) {
-            chat(Text.literal("[Voice Link] This server takes PvPBot voice orders. ")
-                    .formatted(Formatting.GOLD)
-                    .append(Text.literal(engine.status()).formatted(Formatting.GRAY)));
-        } else {
-            chat(Text.literal("[Voice Link] Voice orders active - try \"everyone kill <player>\".")
-                    .formatted(Formatting.GREEN));
+        if (!engine.ready() && !downloading) {
+            chat(Text.literal("[Voice Link] No speech model loaded - run /voicelink setup")
+                    .formatted(Formatting.GOLD));
         }
     }
 
@@ -208,8 +256,9 @@ public final class VoiceLinkClient implements ClientModInitializer {
             return 0;
         }
         downloading = true;
-        ctx.getSource().sendFeedback(Text.literal("Downloading the offline speech model (~40 MB) from "
-                + config.modelUrl).formatted(Formatting.GRAY));
+        ctx.getSource().sendFeedback(Text.literal("Downloading the offline speech model" + config.sizeNote()
+                + " from " + config.modelUrl + " - voice orders keep using your current model until it's done.")
+                .formatted(Formatting.GRAY));
         Thread t = new Thread(() -> {
             try {
                 ModelDownloader.download(config.modelUrl, config.modelDir(),
