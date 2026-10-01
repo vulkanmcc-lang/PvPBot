@@ -330,10 +330,23 @@ public class BuildController {
             return true;
         }
 
-        if (!target.getType().isAir() && !isReplaceable(target.getType())) {
+        if (!target.getType().isAir() && !isReplaceable(target.getType())
+                && !cellHolds(target, task.data)) {
             phase = Phase.CLEAR;
             mine(botPlayer, handle, target, true);
             return true;
+        }
+
+        // The other half's cell has to be free too (or already hold that
+        // half from an earlier try).
+        if (task.hasPartner()) {
+            Block other = partner(target, task);
+            if (!other.getType().isAir() && !isReplaceable(other.getType())
+                    && !cellHolds(other, task.partnerData)) {
+                phase = Phase.CLEAR;
+                mine(botPlayer, handle, other, true);
+                return true;
+            }
         }
 
         phase = Phase.PLACE;
@@ -347,22 +360,38 @@ public class BuildController {
     // block, leaves track their distance - and comparing full states made
     // bots mine their own finished blocks to "fix" them, forever.
     private static boolean isPlaced(Block b, BuildJob.Task t) {
-        if (b.getBlockData().matches(t.data)) return true;
-        Material have = b.getType(), want = t.data.getMaterial();
-        if (have == want) return true;
+        if (!cellHolds(b, t.data)) return false;
+        // A bed/door/tall plant is only built once both halves stand.
+        return !t.hasPartner() || cellHolds(partner(b, t), t.partnerData);
+    }
+
+    private static boolean cellHolds(Block b, org.bukkit.block.data.BlockData want) {
+        if (b.getBlockData().matches(want)) return true;
+        Material have = b.getType(), wantType = want.getMaterial();
+        if (have == wantType) return true;
         // Grass/mycelium/podzol placed under something turn into dirt.
-        return want.name().endsWith("GRASS_BLOCK") && have == Material.DIRT
-                || want == Material.FARMLAND && have == Material.DIRT;
+        return wantType.name().endsWith("GRASS_BLOCK") && have == Material.DIRT
+                || wantType == Material.FARMLAND && have == Material.DIRT;
+    }
+
+    private static Block partner(Block primary, BuildJob.Task t) {
+        return primary.getWorld().getBlockAt(t.px, t.py, t.pz);
     }
 
     private boolean selfOccupies(ServerPlayer handle, BuildJob.Task t) {
-        return boxOverlapsCell(handle.getX(), handle.getY(), handle.getZ(), t);
+        return boxOverlapsCell(handle.getX(), handle.getY(), handle.getZ(), t.x, t.y, t.z)
+                || t.hasPartner()
+                && boxOverlapsCell(handle.getX(), handle.getY(), handle.getZ(), t.px, t.py, t.pz);
     }
 
     private boolean otherEntityOccupies(ServerPlayer handle, BuildJob.Task t) {
         try {
             org.bukkit.util.BoundingBox cell = new org.bukkit.util.BoundingBox(
                     t.x, t.y, t.z, t.x + 1.0, t.y + 1.0, t.z + 1.0);
+            if (t.hasPartner()) {
+                cell.union(new org.bukkit.util.BoundingBox(
+                        t.px, t.py, t.pz, t.px + 1.0, t.py + 1.0, t.pz + 1.0));
+            }
             for (org.bukkit.entity.Entity e :
                     job.world.getNearbyEntities(cell, e -> e instanceof org.bukkit.entity.LivingEntity)) {
                 if (e.getEntityId() == handle.getId()) continue;
@@ -373,12 +402,12 @@ public class BuildController {
         return false;
     }
 
-    private static boolean boxOverlapsCell(double x, double feetY, double z, BuildJob.Task t) {
+    private static boolean boxOverlapsCell(double x, double feetY, double z, int cx, int cy, int cz) {
         final double half = 0.31;
         final double height = 1.8;
-        return x + half > t.x && x - half < t.x + 1.0
-                && z + half > t.z && z - half < t.z + 1.0
-                && feetY + height > t.y && feetY < t.y + 1.0;
+        return x + half > cx && x - half < cx + 1.0
+                && z + half > cz && z - half < cz + 1.0
+                && feetY + height > cy && feetY < cy + 1.0;
     }
 
     private boolean losBlockedByBuild = false;
@@ -745,7 +774,12 @@ public class BuildController {
         }
 
         org.bukkit.block.BlockState replaced = target.getState();
+        Block other = task.hasPartner() ? partner(target, task) : null;
+        org.bukkit.block.BlockState otherReplaced = other != null ? other.getState() : null;
 
+        // Both halves of a bed/door/tall plant in the same tick, without
+        // physics in between - a lone half would pop off immediately.
+        if (other != null) other.setBlockData(task.partnerData, false);
         target.setBlockData(task.data, false);
 
         ItemStack held = botPlayer.getInventory().getItem(slot);
@@ -759,6 +793,7 @@ public class BuildController {
 
         if (event.isCancelled()) {
             replaced.update(true, false);
+            if (otherReplaced != null) otherReplaced.update(true, false);
 
             job.complete(task);
             task = null;

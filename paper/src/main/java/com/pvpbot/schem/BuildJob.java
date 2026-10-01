@@ -20,17 +20,36 @@ public class BuildJob {
         public final BlockData data;
         public final Material item;
 
+        // The other half of a two-block block (bed head, door/tall-plant top)
+        // - placed together with this one, from the same single item, the
+        // way vanilla places them. Null for ordinary blocks.
+        public final BlockData partnerData;
+        public final int px, py, pz;
+
         UUID owner;
 
         int leaseTicks;
         boolean done;
 
         Task(int x, int y, int z, BlockData data, Material item) {
+            this(x, y, z, data, item, null, 0, 0, 0);
+        }
+
+        Task(int x, int y, int z, BlockData data, Material item,
+             BlockData partnerData, int px, int py, int pz) {
             this.x = x;
             this.y = y;
             this.z = z;
             this.data = data;
             this.item = item;
+            this.partnerData = partnerData;
+            this.px = px;
+            this.py = py;
+            this.pz = pz;
+        }
+
+        public boolean hasPartner() {
+            return partnerData != null;
         }
 
         public Location location(World w) {
@@ -120,19 +139,87 @@ public class BuildJob {
 
     private static List<Task> tasksFrom(Schematic schem, int ox, int oy, int oz) {
         List<Task> list = new ArrayList<>();
+        java.util.Set<Long> seen = new java.util.HashSet<>();
         for (int y = 0; y < schem.height; y++) {
             for (int z = 0; z < schem.length; z++) {
                 for (int x = 0; x < schem.width; x++) {
                     BlockData d = schem.at(x, y, z);
                     if (d == null) continue;
-                    Material m = d.getMaterial();
-                    if (m.isAir()) continue;
-                    if (!m.isBlock() || !m.isItem()) continue;
-                    list.add(new Task(ox + x, oy + y, oz + z, d, m));
+                    Task t = taskFor(ox + x, oy + y, oz + z, d);
+                    if (t != null && seen.add(key(t.x, t.y, t.z))) list.add(t);
                 }
             }
         }
         return list;
+    }
+
+    // ---- two-block blocks
+    //
+    // Beds (foot + head) and doors / tall flowers / tall grass / small
+    // dripleaf (bottom + top) are one item that fills two cells. Building
+    // each half as its own task put down lone halves - a second item for
+    // the other half, and a lone half pops off at the next block update -
+    // so a pair becomes one task on its foot/bottom cell that places both.
+
+    private static boolean isTwoTall(BlockData d) {
+        return d instanceof org.bukkit.block.data.Bisected
+                && !(d instanceof org.bukkit.block.data.type.Stairs)
+                && !(d instanceof org.bukkit.block.data.type.TrapDoor);
+    }
+
+    private static boolean isPairBlock(BlockData d) {
+        return d instanceof org.bukkit.block.data.type.Bed || isTwoTall(d);
+    }
+
+    private static boolean isPrimaryHalf(BlockData d) {
+        if (d instanceof org.bukkit.block.data.type.Bed bed) {
+            return bed.getPart() == org.bukkit.block.data.type.Bed.Part.FOOT;
+        }
+        return ((org.bukkit.block.data.Bisected) d).getHalf()
+                == org.bukkit.block.data.Bisected.Half.BOTTOM;
+    }
+
+    // Offset from the foot/bottom half to the head/top half.
+    private static int[] partnerOffset(BlockData primary) {
+        if (primary instanceof org.bukkit.block.data.type.Bed bed) {
+            org.bukkit.block.BlockFace f = bed.getFacing();
+            return new int[]{f.getModX(), 0, f.getModZ()};
+        }
+        return new int[]{0, 1, 0};
+    }
+
+    // The same block as its foot/bottom (primary=true) or head/top half.
+    private static BlockData asHalf(BlockData d, boolean primary) {
+        BlockData c = d.clone();
+        if (c instanceof org.bukkit.block.data.type.Bed bed) {
+            bed.setPart(primary ? org.bukkit.block.data.type.Bed.Part.FOOT
+                    : org.bukkit.block.data.type.Bed.Part.HEAD);
+        } else if (c instanceof org.bukkit.block.data.Bisected b) {
+            b.setHalf(primary ? org.bukkit.block.data.Bisected.Half.BOTTOM
+                    : org.bukkit.block.data.Bisected.Half.TOP);
+        }
+        return c;
+    }
+
+    // The task that builds the block at (x, y, z). Either half of a pair
+    // maps to the same task on the primary half's cell (so a pair is
+    // listed once, and a pair cut in half by the schematic edge still gets
+    // built whole).
+    private static Task taskFor(int x, int y, int z, BlockData d) {
+        Material m = d.getMaterial();
+        if (m.isAir() || !m.isBlock() || !m.isItem()) return null;
+        if (!isPairBlock(d)) return new Task(x, y, z, d, m);
+
+        BlockData primary = isPrimaryHalf(d) ? d : asHalf(d, true);
+        int[] off = partnerOffset(primary);
+        int bx = x, by = y, bz = z;
+        if (!isPrimaryHalf(d)) {
+            bx -= off[0];
+            by -= off[1];
+            bz -= off[2];
+        }
+        return new Task(bx, by, bz, primary, m, asHalf(primary, false),
+                bx + off[0], by + off[1], bz + off[2]);
     }
 
     // One block of a generated build (no schematic file): a voice-ordered
@@ -148,10 +235,9 @@ public class BuildJob {
         List<Task> list = new ArrayList<>();
         java.util.Set<Long> seen = new java.util.HashSet<>();
         for (Placement p : blocks) {
-            Material m = p.data().getMaterial();
-            if (m.isAir() || !m.isBlock() || !m.isItem()) continue;
-            if (!seen.add(key(p.x(), p.y(), p.z()))) continue;
-            list.add(new Task(p.x(), p.y(), p.z(), p.data(), m));
+            Task t = taskFor(p.x(), p.y(), p.z(), p.data());
+            if (t == null || !seen.add(key(t.x, t.y, t.z))) continue;
+            list.add(t);
         }
         return new BuildJob(name, world, startX, startY, startZ, faction, list, startX + 0.5, startZ + 0.5);
     }
@@ -179,7 +265,10 @@ public class BuildJob {
                     return dx * dx + dz * dz;
                 }));
 
-        for (Task t : list) cells.add(key(t.x, t.y, t.z));
+        for (Task t : list) {
+            cells.add(key(t.x, t.y, t.z));
+            if (t.hasPartner()) cells.add(key(t.px, t.py, t.pz));
+        }
 
         this.tasks = list;
         this.currentLayer = list.isEmpty() ? 0 : list.get(0).y;
