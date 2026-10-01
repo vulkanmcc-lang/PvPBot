@@ -4,10 +4,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
-import org.bukkit.block.BlockFace;
 import org.bukkit.block.data.BlockData;
-import org.bukkit.block.data.type.Slab;
-import org.bukkit.block.data.type.Wall;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,9 +26,10 @@ import java.util.Map;
 public final class PathPlan {
     public static final int MAX_LENGTH = 64;
 
-    public static final Material DECK = Material.STONE_BRICKS;
-    public static final Material RAIL = Material.STONE_BRICK_WALL;
-    public static final Material ROOF = Material.STONE_BRICK_SLAB;
+    // Everything the bots build outside schematics is end stone.
+    public static final Material DECK = Material.END_STONE;
+    public static final Material RAIL = Material.END_STONE;
+    public static final Material ROOF = Material.END_STONE;
 
     private static final double WALK_HALF = 1.5;  // |dist| <= 1.5: walkway
     private static final double EDGE_HALF = 2.5;  // 1.5 < |dist| <= 2.5: rail edge
@@ -92,12 +90,10 @@ public final class PathPlan {
             place(out, w, c[0], c[1], c[2], Bukkit.createBlockData(DECK));
         }
         for (int[] wl : walls) {
-            place(out, w, wl[0], wl[1], wl[2], wallData(wl[0], wl[1], wl[2], wallSet));
+            place(out, w, wl[0], wl[1], wl[2], Bukkit.createBlockData(RAIL));
         }
-        Slab slab = (Slab) Bukkit.createBlockData(ROOF);
-        slab.setType(Slab.Type.BOTTOM);
         for (int[] c : deck.values()) {
-            place(out, w, c[0], c[1] + ROOF_HEIGHT, c[2], slab.clone());
+            place(out, w, c[0], c[1] + ROOF_HEIGHT, c[2], Bukkit.createBlockData(ROOF));
         }
         return out;
     }
@@ -108,25 +104,6 @@ public final class PathPlan {
         int ideal = (int) Math.round(rise * Math.min(1.0, t / total));
         int cap = (int) Math.floor(t);
         return Math.max(-cap, Math.min(cap, ideal));
-    }
-
-    private static BlockData wallData(int x, int y, int z, java.util.Set<Long> walls) {
-        Wall wall = (Wall) Bukkit.createBlockData(RAIL);
-        int links = 0;
-        boolean ns = false, ew = false;
-        for (BlockFace f : new BlockFace[]{BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST}) {
-            boolean joined = walls.contains(key3(x + f.getModX(), y, z + f.getModZ()));
-            wall.setHeight(f, joined ? Wall.Height.LOW : Wall.Height.NONE);
-            if (joined) {
-                links++;
-                if (f == BlockFace.NORTH || f == BlockFace.SOUTH) ns = true;
-                else ew = true;
-            }
-        }
-        boolean straight = links == 2 && (ns != ew);
-        boolean postAbove = walls.contains(key3(x, y + 1, z));
-        wall.setUp(!straight || postAbove);
-        return wall;
     }
 
     private static void place(List<BuildJob.Placement> out, World w, int x, int y, int z, BlockData d) {

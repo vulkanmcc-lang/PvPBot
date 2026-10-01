@@ -38,7 +38,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Tunnel | everyone tunnel this way *(each bot digs its own 32-long tunnel the way you face - side by side, some level, some ramping up, some down)* |
 | Build up | everyone build up · pillar up *(10 blocks up, every bot on its own column)* |
 | Path | everyone make a path there · build a bridge there *(covered 3-wide bridge with rails and a roof to the block you look at, up to 64 long; the bots share the work)* · stop building |
-| Look | everyone look at me |
+| Look | everyone look at me *(bots within 5 blocks of you back off to ~6 first; then they all stay where they are and keep watching you until the next order)* |
 | Island bridge (End only) | everyone bridge to the next island · go to the next island *(finds the nearest other End island and bridges to it in end stone, 3 wide: the nearest bot leads out along the middle, sneaking, a block at a time; the rest fill the sides behind it. Bots don't push each other while bridging; one that falls anyway is put back on the bridge. "stop the bridge" stops it)* |
 | Scatter | everyone scatter · spread out · split up · run away *(every bot runs off in a different direction)* |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
@@ -56,6 +56,10 @@ while and goes back to its orders instead of standing there jumping.
 Bots that end up stuck in a hole (a pit, a shaft, a dug-out area) while you
 or the spot they were sent to is up above walk to the wall, pillar up beside
 it and step off at the top.
+
+Everything the bots build outside schematics - island bridges, paths,
+pillars, build up, hole escapes, water plugs - is end stone (they're handed
+some when they run out).
 
 Mining near water: bots plug water beside or above a block before breaking
 it, and a bot that ends up in water over the dig sinks to the bottom, digs 3

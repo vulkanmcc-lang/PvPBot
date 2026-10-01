@@ -66,7 +66,14 @@ public class BotAI {
         if (impulseHandle != null) impulseHandle.tryResetCurrentImpulseContext();
 
         Player handOwner = context.bot.getBukkitPlayer();
-        if (handOwner != null && context.target != null
+        // Working (digging, building, bridging, tunnelling): the tool in hand
+        // stays - grabbing the sword because an enemy exists somewhere would
+        // swap it out mid-block. When it's time to actually fight, the work
+        // steps aside and combat picks the weapon itself.
+        boolean working = context.excavationController.isActive() || context.buildController.isBusy()
+                || context.islandBridgeController.isActive() || context.tunnelController.isActive()
+                || context.cobwebDefenseBreakTicks > 0;
+        if (handOwner != null && !working && context.target != null
                 && !context.eating && context.drinkingPotionTimer <= 0
                 && context.maceWindupTicks <= 0 && context.maceStunSlamPhase == 0
                 && context.splashPotionTimer <= 0) {
@@ -189,9 +196,22 @@ public class BotAI {
         context.combatController.handleWaterScoop(botPlayer);
 
         if (context.blockToBreak != null && context.breakingCobwebTimer > 0) {
-            if (--context.breakingCobwebTimer <= 0) {
-                if (context.blockToBreak.getBlock().getType() == org.bukkit.Material.COBWEB) {
-                    context.blockToBreak.getBlock().setType(org.bukkit.Material.AIR);
+            org.bukkit.block.Block web = context.blockToBreak.getBlock();
+            --context.breakingCobwebTimer;
+            // The last half second it visibly cracks before it goes.
+            if (context.breakingCobwebTimer < 10 && web.getType() == org.bukkit.Material.COBWEB) {
+                int stage = context.breakingCobwebTimer <= 0 ? -1 : 9 - context.breakingCobwebTimer;
+                try {
+                    context.packetBroadcaster.sendPacketToAll(
+                            new net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket(
+                                    handle0().getId(),
+                                    new net.minecraft.core.BlockPos(web.getX(), web.getY(), web.getZ()), stage));
+                } catch (Throwable ignored) {
+                }
+            }
+            if (context.breakingCobwebTimer <= 0) {
+                if (web.getType() == org.bukkit.Material.COBWEB) {
+                    web.setType(org.bukkit.Material.AIR);
                 }
                 context.blockToBreak = null;
             }
@@ -791,7 +811,7 @@ public class BotAI {
     // level or below; if even that isn't possible, give up on it for a
     // while instead of standing there jumping at the floor. Never touches a
     // bot that's busy with an order (walk, hold, dig, build, climb, bow).
-    private static final int UNREACHABLE_DIG_TICKS = 40;
+    private static final int UNREACHABLE_DIG_TICKS = 60;
     private static final int UNREACHABLE_DROP_TICKS = 200;
     private static final int IGNORE_TICKS = 400;
 
@@ -809,6 +829,13 @@ public class BotAI {
             return;
         }
         if ((context.tickCounter % 5) != 0) return;
+        // Walking a path around something (that wall with a gap at the end)
+        // can take us further away for a while - that's not being stuck.
+        boolean onPath = !context.currentPath.isEmpty() && context.pathNodeIndex < context.currentPath.size();
+        if (onPath && context.pathFailures < 2) {
+            context.unreachableTicks = Math.max(0, context.unreachableTicks - 5);
+            return;
+        }
         double d = botPlayer.getLocation().distance(t.getLocation());
         boolean inSwing = d <= context.settings.getReach() + 1.5
                 && context.combatController.hasLineOfSight(botPlayer, t);
@@ -820,10 +847,15 @@ public class BotAI {
         context.unreachableTicks += 5;
         if (context.unreachableTicks < UNREACHABLE_DIG_TICKS) return;
 
-        // Getting nowhere for 2 s (seeing them or not - a 1-wide gap, a
-        // fence, glass, a wall with them right behind it): dig through.
+        // Getting nowhere AND the path finder can't find a way round (a 1-wide
+        // gap, a sealed room, them right behind a wall): only then dig.
+        // Going around always beats digging through.
+        boolean noWayRound = context.pathFailures >= 2 || context.unreachableTicks >= UNREACHABLE_DIG_TICKS * 3;
+        if (!noWayRound && !onPath && context.pathRecalcCooldown <= 0) {
+            context.pathfindingController.calculatePathAsync(botPlayer.getLocation(), t.getLocation());
+        }
         double rise = t.getLocation().getY() - botPlayer.getLocation().getY();
-        if (rise <= 2.5 && d <= 40.0 && context.chaseCooldown <= 0) {
+        if (noWayRound && rise <= 2.5 && d <= 40.0 && context.chaseCooldown <= 0) {
             context.chaseCooldown = 40;
             if (context.excavationController.startChase(botPlayer, t)) {
                 context.unreachableTicks = 0;
@@ -840,6 +872,10 @@ public class BotAI {
         }
     }
 
+    private net.minecraft.server.level.ServerPlayer handle0() {
+        return context.bot.getHandle();
+    }
+
     private void maybeStartTunnel(Player botPlayer) {
         if (context.tunnelController.isActive()) return;
 
@@ -850,12 +886,17 @@ public class BotAI {
             return;
         }
 
+        // Only tunnel when the path finder has given up: bumping a wall, or
+        // a path that stalls for a moment, means "walk round", not "dig".
         boolean plannerGaveUp = context.pathFailures >= TUNNEL_PATH_FAILURES;
-        boolean pathStuck = !context.currentPath.isEmpty()
-                && context.pathNodeIndex < context.currentPath.size()
-                && context.chaseBlockedTicks >= TUNNEL_BLOCKED_TICKS;
-
-        if (!plannerGaveUp && !grindingWall && !pathStuck) return;
+        if (!plannerGaveUp) {
+            if (grindingWall && context.target != null && context.pathRecalcCooldown <= 0
+                    && (context.currentPath.isEmpty() || context.pathNodeIndex >= context.currentPath.size())) {
+                context.pathfindingController.calculatePathAsync(botPlayer.getLocation(),
+                        context.target.getLocation());
+            }
+            return;
+        }
 
         org.bukkit.Location dest = null;
         if (!context.currentPath.isEmpty()) {

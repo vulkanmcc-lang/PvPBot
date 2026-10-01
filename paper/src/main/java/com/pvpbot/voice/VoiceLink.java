@@ -251,7 +251,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         // this instead. Only orders that sit on top of anything (armor,
         // "look at me", "weapons free") leave the current task running.
         boolean interrupts = switch (order.intent()) {
-            case ARMOR_ON, ARMOR_OFF, ARMOR_BEST, ARMOR_WORST, LOOK_AT_ME, ENGAGE -> false;
+            case ARMOR_ON, ARMOR_OFF, ARMOR_BEST, ARMOR_WORST, ENGAGE -> false;
             default -> true;
         };
         if (interrupts) {
@@ -406,6 +406,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         "path", speaker.getWorld(), blocks,
                         speaker.getLocation().getBlockX(), speaker.getLocation().getBlockY() - 1,
                         speaker.getLocation().getBlockZ(), who);
+                job.setScaffoldMaterial(com.pvpbot.ai.InventoryController.BUILD_BLOCK);
                 List<Player> crewPlayers = new ArrayList<>();
                 for (PvPBot b : bots) {
                     Player bp = b.getBukkitPlayer();
@@ -466,8 +467,35 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         + (given > 0 ? " - gave " + given + " cobblestone" : ""));
             }
             case LOOK_AT_ME -> {
+                // Anyone within 5 blocks of the speaker (height ignored)
+                // backs off to ~6 blocks first, so they're not in your face;
+                // then everyone holds their spot and watches you until the
+                // next order.
                 UUID id = speaker.getUniqueId();
-                for (PvPBot b : bots) removeFrom(lookTasks, b);
+                Location sp = speaker.getLocation();
+                java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+                int backing = 0;
+                for (PvPBot b : bots) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp == null || bp.getWorld() != sp.getWorld()) continue;
+                    double dx = bp.getLocation().getX() - sp.getX(), dz = bp.getLocation().getZ() - sp.getZ();
+                    double flat = Math.hypot(dx, dz);
+                    if (flat >= LOOK_CLEARANCE) continue;
+                    if (flat < 0.3) {
+                        double a = rnd.nextDouble() * Math.PI * 2;
+                        dx = Math.cos(a);
+                        dz = Math.sin(a);
+                        flat = 1.0;
+                    }
+                    double out = LOOK_CLEARANCE + 1.0 + rnd.nextDouble();
+                    int x = (int) Math.floor(sp.getX() + dx / flat * out);
+                    int z = (int) Math.floor(sp.getZ() + dz / flat * out);
+                    int y = groundNear(sp.getWorld(), x, z, bp.getLocation().getBlockY());
+                    Location dest = new Location(sp.getWorld(), x + 0.5, y, z + 0.5);
+                    dest.setYaw((float) Math.toDegrees(Math.atan2(-(sp.getX() - dest.getX()), sp.getZ() - dest.getZ())));
+                    b.orderToFormationSlot(dest, 200);
+                    backing++;
+                }
                 List<PvPBot> crew = new ArrayList<>(bots);
                 Crewed look = new Crewed(crew);
                 lookTasks.add(look);
@@ -484,6 +512,12 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         Player bp = b.getBukkitPlayer();
                         if (bp == null || !b.isAlive() || bp.getWorld() != eye.getWorld()) continue;
                         var ctx = b.getAI().getContext();
+                        if (ctx.formationSlot != null) continue; // still backing off
+                        if (ctx.guardAnchor == null) {
+                            // Arrived (or couldn't go further): stay right here.
+                            b.setGuardPost(bp.getLocation(), HOLD_RADIUS, bp.getLocation().getYaw());
+                            ctx.voiceHold = true;
+                        }
                         if (ctx.target != null) continue; // fighting beats looking
                         Location be = bp.getEyeLocation();
                         double dx = eye.getX() - be.getX(), dy = eye.getY() - be.getY(), dz = eye.getZ() - be.getZ();
@@ -494,7 +528,8 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         ctx.requestLook(yaw, pitch, com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
                     }
                 }, 0L, 1L);
-                ok(speaker, transcript, who + " → looking at you (" + bots.size() + ")");
+                ok(speaker, transcript, who + " → looking at you and staying put (" + bots.size() + ")"
+                        + (backing > 0 ? " - " + backing + " backing off first" : ""));
             }
             case ARMOR_ON, ARMOR_OFF -> {
                 boolean on = order.intent() == Intent.ARMOR_ON;
@@ -662,14 +697,14 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         speaker.getUniqueId(), speaker.getWorld(), plan);
                 int each = needed / Math.max(1, bots.size()) + 16;
                 // Nearest bot to the bridge start leads.
-                List<PvPBot> order = new ArrayList<>(bots);
+                List<PvPBot> crewOrder = new ArrayList<>(bots);
                 Location start = plan.from();
-                order.sort(java.util.Comparator.comparingDouble(b -> {
+                crewOrder.sort(java.util.Comparator.comparingDouble(b -> {
                     Player bp = b.getBukkitPlayer();
                     return bp == null || bp.getWorld() != start.getWorld()
                             ? Double.MAX_VALUE : bp.getLocation().distanceSquared(start);
                 }));
-                for (PvPBot b : order) {
+                for (PvPBot b : crewOrder) {
                     b.setForcedTarget(null);
                     b.getAI().getContext().islandBridgeController.join(job, each);
                 }
@@ -763,7 +798,9 @@ public final class VoiceLink implements PluginMessageListener, Listener {
 
     private static final int TUNNEL_LENGTH = 32;
     private static final int BUILD_UP_HEIGHT = 10;
-    private static final int LOOK_TICKS = 20 * 6;
+    // "look at me" lasts until the next order (capped at 30 minutes).
+    private static final int LOOK_TICKS = 20 * 60 * 30;
+    private static final double LOOK_CLEARANCE = 5.0;
 
     private static long columnKey(int x, int z) {
         return ((long) x << 32) ^ (z & 0xffffffffL);

@@ -137,8 +137,11 @@ public class BotAIContext {
     public int critPhaseTicks = 0;
     public int cobwebCooldown = 0;
     public int breakingCobwebTimer = 0;
-    int cobwebDefenseBreakTicks = 0;
+    public int cobwebDefenseBreakTicks = 0;
     int cobwebBreakTarget = 11;
+    // The web being cut (so switching to the other web resets progress).
+    org.bukkit.block.Block cobwebBreaking = null;
+    int cobwebStage = -1;
     int waterScoopTimer = 0;
     Location placedWaterLoc = null;
     int blockPlaceCooldown = 0;

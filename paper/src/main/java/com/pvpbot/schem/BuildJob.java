@@ -40,6 +40,18 @@ public class BuildJob {
 
     public static final Material SCAFFOLD = Material.COBBLESTONE;
 
+    // Schematic builds scaffold with cobblestone; everything else the bots
+    // build (voice paths) uses end stone throughout.
+    private Material scaffoldMaterial = SCAFFOLD;
+
+    public Material scaffoldMaterial() {
+        return scaffoldMaterial;
+    }
+
+    public void setScaffoldMaterial(Material m) {
+        if (m != null) scaffoldMaterial = m;
+    }
+
     // A temporary block a bot placed to reach part of the build (a pillar
     // step or a bridge floor). Tracked here, not just in the bot, so the job
     // can guarantee none are left behind even if the bot that placed them
@@ -416,7 +428,7 @@ public class BuildJob {
     public void distribute(List<Player> crew, Map<Material, Integer> bill) {
         if (crew.isEmpty()) return;
 
-        for (Player p : crew) giveItems(p, SCAFFOLD, 64);
+        for (Player p : crew) giveItems(p, scaffoldMaterial, 64);
 
         int[] slotsUsed = new int[crew.size()];
 
@@ -495,7 +507,7 @@ public class BuildJob {
             ItemStack s = contents[i];
             if (s == null || s.getType().isAir()) continue;
             if (s.getType() == wanted) continue;
-            if (s.getType() == SCAFFOLD) continue;
+            if (s.getType() == scaffoldMaterial) continue;
 
             int score = stillNeeded.contains(s.getType()) ? s.getAmount() : 100_000;
             if (score > bestScore) {

@@ -773,7 +773,7 @@ public class BuildController {
         int blocksNeeded = 0;
         for (ScaffoldPlanner.Step st : p) if (st.placesBlock()) blocksNeeded++;
         if (blocksNeeded > 0 && countScaffold(botPlayer) < blocksNeeded) {
-            job.supply(botPlayer, BuildJob.SCAFFOLD, Math.max(32, blocksNeeded));
+            job.supply(botPlayer, job.scaffoldMaterial(), Math.max(32, blocksNeeded));
         }
 
         plan = p;
@@ -923,7 +923,7 @@ public class BuildController {
     private int countScaffold(Player botPlayer) {
         int n = 0;
         for (ItemStack it : botPlayer.getInventory().getStorageContents()) {
-            if (it != null && it.getType() == BuildJob.SCAFFOLD) n += it.getAmount();
+            if (it != null && it.getType() == job.scaffoldMaterial()) n += it.getAmount();
         }
         return n;
     }
@@ -936,11 +936,11 @@ public class BuildController {
         if (job.isBuildCell(cell.getX(), cell.getY(), cell.getZ())) return false;
 
         int slot = context.inventoryController.ensureInHotbar(
-                botPlayer, it -> it.getType() == BuildJob.SCAFFOLD);
+                botPlayer, it -> it.getType() == job.scaffoldMaterial());
         if (slot < 0) {
-            job.supply(botPlayer, BuildJob.SCAFFOLD, 32);
+            job.supply(botPlayer, job.scaffoldMaterial(), 32);
             slot = context.inventoryController.ensureInHotbar(
-                    botPlayer, it -> it.getType() == BuildJob.SCAFFOLD);
+                    botPlayer, it -> it.getType() == job.scaffoldMaterial());
         }
         if (slot < 0 || slot > 8) return false;
         botPlayer.getInventory().setHeldItemSlot(slot);
@@ -950,7 +950,7 @@ public class BuildController {
         org.bukkit.block.BlockState replaced = cell.getState();
         Block against = pillar ? cell.getRelative(0, -1, 0)
                 : job.world.getBlockAt(standX, standY - 1, standZ);
-        cell.setType(BuildJob.SCAFFOLD, true);
+        cell.setType(job.scaffoldMaterial(), true);
 
         org.bukkit.event.block.BlockPlaceEvent event =
                 new org.bukkit.event.block.BlockPlaceEvent(
@@ -970,7 +970,7 @@ public class BuildController {
                     cell.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
         } catch (Throwable ignored) {
         }
-        job.addScaffold(cell.getX(), cell.getY(), cell.getZ(), BuildJob.SCAFFOLD,
+        job.addScaffold(cell.getX(), cell.getY(), cell.getZ(), job.scaffoldMaterial(),
                 context.bot.getUUID(), pillar, standX, standY, standZ);
         return true;
     }

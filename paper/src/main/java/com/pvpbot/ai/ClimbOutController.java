@@ -27,7 +27,7 @@ import java.util.UUID;
 //   3. step off onto it, then hand back to normal navigation.
 // A bot with no blocks is given some cobblestone, like the pillar-to order.
 public class ClimbOutController {
-    private static final int STALL_TICKS = 60;
+    private static final int STALL_TICKS = 100;
     private static final double MIN_RISE = 2.0;
     private static final int WALL_SEARCH = 6;
     private static final int APPROACH_TIMEOUT = 60;
@@ -123,8 +123,10 @@ public class ClimbOutController {
         }
         if (++noProgress < STALL_TICKS) return false;
 
-        // Stuck with the way up. Boxed in, or just a bad path?
-        if (!context.movementController.isTrappedBelow(me) && context.pathFailures < 2) {
+        // Stuck with the way up: only pillar when it's boxed in AND the path
+        // finder can't find a way out - a hill, stairs or a ramp to the
+        // leader is walked, not towered.
+        if (!context.movementController.isTrappedBelow(me) || context.pathFailures < 2) {
             noProgress = STALL_TICKS / 2;
             return false;
         }
@@ -168,15 +170,8 @@ public class ClimbOutController {
                     && context.guardAnchor.distanceSquared(botPlayer.getLocation()) > 9.0
                     ? context.guardAnchor : null;
         }
-        if (context.followHolding) return null; // already next to the leader
-        BotManager mgr = PvPBotPlugin.getInstance().getBotManager();
-        UUID leaderId = mgr == null ? null : mgr.getLeaderFor(context.bot.getUUID());
-        if (leaderId != null && !leaderId.equals(context.bot.getUUID())) {
-            Player leader = Bukkit.getPlayer(leaderId);
-            if (leader != null && leader.isOnline() && !leader.isDead() && leader.getWorld() == w) {
-                return leader.getLocation();
-            }
-        }
+        // Following the leader never builds towers: a bot that really is in
+        // a pit gets out through the hole escape.
         return null;
     }
 
@@ -305,7 +300,7 @@ public class ClimbOutController {
                 return false;
             }
             lastGiftTick = now;
-            botPlayer.getInventory().addItem(new ItemStack(Material.COBBLESTONE, GIFT_BLOCKS));
+            botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIFT_BLOCKS));
             context.packetBroadcaster.broadcastEquipment();
         }
         context.movementController.pillarUpStep(botPlayer);

@@ -1401,7 +1401,11 @@ public class MovementController {
             }
 
             if (holeEscapeStalled(loc, emergencyEscape)) {
-                if (pillarOutOfHole(botPlayer, handle, loc)) return true;
+                // Only tower out when walking out really failed (the path
+                // finder found nothing) - not because one walk attempt
+                // stalled for a second.
+                if ((context.pathFailures >= 1 || emergencyEscape)
+                        && pillarOutOfHole(botPlayer, handle, loc)) return true;
                 return giveUpHoleEscape();
             }
             return true;

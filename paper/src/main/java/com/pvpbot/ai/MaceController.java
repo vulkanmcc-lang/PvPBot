@@ -15,6 +15,20 @@ public class MaceController {
 
     private static final float MIN_SMASH_FALL = 1.6f;
 
+    // Blocks of fall the bot sets up for (a ledge, or room under the roof
+    // for a wind-charge hop). Smashes count from 1.5 blocks of fall.
+    private static final int MIN_SMASH_HEIGHT = 3;
+
+    // Open air straight above the head, up to 12.
+    private static int headroom(Player botPlayer) {
+        Location l = botPlayer.getLocation();
+        org.bukkit.World w = l.getWorld();
+        int x = l.getBlockX(), z = l.getBlockZ(), y = l.getBlockY() + 2;
+        int n = 0;
+        while (n < 12 && !w.getBlockAt(x, y + n, z).getType().isSolid()) n++;
+        return n;
+    }
+
     // The smash bonus comes from the fall, not the swing charge (vanilla adds
     // the mace's fall damage on top of the charge-scaled base), and the
     // charge restarts the moment the mace is pulled out mid-launch. Waiting
@@ -244,10 +258,18 @@ public class MaceController {
         if (target == null) return Launch.NONE;
 
         double drop = botPlayer.getLocation().getY() - target.getLocation().getY();
+        double flat = Math.hypot(target.getLocation().getX() - botPlayer.getLocation().getX(),
+                target.getLocation().getZ() - botPlayer.getLocation().getZ());
 
+        // Any drop of 3+ onto them is a smash (more than 1.5 blocks of fall is
+        // all the mace needs) - step off the ledge, no need to be right on
+        // top of them.
         if (distance <= SETUP_RANGE && drop >= 2.0) return Launch.HEIGHT;
+        if (drop >= MIN_SMASH_HEIGHT && flat <= 4.0) return Launch.HEIGHT;
 
-        if (distance <= SETUP_RANGE
+        // A wind charge only has to throw us 3 blocks up: fine in a cave with
+        // a low roof, pointless under a 2-high ceiling.
+        if (distance <= SETUP_RANGE && headroom(botPlayer) >= MIN_SMASH_HEIGHT
                 && context.inventoryController.findWindChargeSlot(botPlayer) >= 0) {
             return Launch.WIND_CHARGE;
         }

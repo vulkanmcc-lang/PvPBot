@@ -782,8 +782,21 @@ public class InventoryController {
         return ensureInHotbar(p, it -> it.getType() == Material.GOLDEN_APPLE);
     }
 
+    // Everything the bots build outside schematics (pillars, bridges, hole
+    // escapes, plugs) is end stone. A bot that has none is topped up - at
+    // most once a minute, so it isn't an endless supply mid-fight.
+    public static final Material BUILD_BLOCK = Material.END_STONE;
+    private int lastBuildBlockGift = Integer.MIN_VALUE / 2;
+
     public int findBlockSlot(Player p) {
-        return ensureInHotbar(p, InventoryController::isPlaceableBlock);
+        int slot = ensureInHotbar(p, it -> it.getType() == BUILD_BLOCK);
+        if (slot >= 0) return slot;
+        int now = org.bukkit.Bukkit.getCurrentTick();
+        if (now - lastBuildBlockGift < 1200) return -1;
+        lastBuildBlockGift = now;
+        p.getInventory().addItem(new ItemStack(BUILD_BLOCK, 32));
+        context.packetBroadcaster.broadcastEquipment();
+        return ensureInHotbar(p, it -> it.getType() == BUILD_BLOCK);
     }
 
     public int findItemSlot(Player p, Material m) {

@@ -727,7 +727,7 @@ public class ExcavationController {
         if (slot < 0 && !gaveSealBlocks) {
             // Nothing to plug with: same deal as pillaring - hand out some
             // cobblestone once so the job doesn't just flood.
-            botPlayer.getInventory().addItem(new ItemStack(Material.COBBLESTONE, GIVE_SEAL_BLOCKS));
+            botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_SEAL_BLOCKS));
             gaveSealBlocks = true;
             slot = sealSlot(botPlayer);
         }
@@ -769,31 +769,6 @@ public class ExcavationController {
         clearStage();
         breaking = null;
         return true;
-    }
-
-    private static final Material[] SEAL_PREFERRED = {
-            Material.COBBLESTONE, Material.COBBLED_DEEPSLATE, Material.DIRT, Material.NETHERRACK,
-            Material.STONE, Material.DEEPSLATE, Material.ANDESITE, Material.DIORITE, Material.GRANITE,
-            Material.TUFF, Material.BLACKSTONE, Material.END_STONE, Material.COARSE_DIRT,
-            Material.STONE_BRICKS, Material.OAK_PLANKS, Material.SPRUCE_PLANKS};
-
-    // Hotbar slot of something cheap and solid to plug water with.
-    private int sealSlot(Player botPlayer) {
-        for (Material m : SEAL_PREFERRED) {
-            if (!botPlayer.getInventory().contains(m)) continue;
-            int slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == m);
-            if (slot >= 0) return slot;
-        }
-        return context.inventoryController.ensureInHotbar(botPlayer, it -> isPlainBlock(it.getType()));
-    }
-
-    private static boolean isPlainBlock(Material m) {
-        if (!m.isBlock() || !m.isSolid() || !m.isOccluding() || m.hasGravity()) return false;
-        if (m.isInteractable() || m == Material.TNT) return false;
-        String n = m.name();
-        return !(n.contains("ORE") || n.contains("DIAMOND") || n.contains("EMERALD") || n.contains("NETHERITE")
-                || n.contains("GOLD") || n.contains("IRON") || n.contains("LAPIS") || n.contains("REDSTONE")
-                || n.contains("SHULKER") || n.contains("SPAWNER") || n.contains("BEACON") || n.contains("ANCIENT"));
     }
 
     // In water inside the job (or right at its edge) with something diggable

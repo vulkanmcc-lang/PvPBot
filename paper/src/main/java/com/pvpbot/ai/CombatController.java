@@ -1084,6 +1084,10 @@ public class CombatController {
         Block feet = loc.getBlock();
         Block head = loc.clone().add(0, 1, 0).getBlock();
         if (feet.getType() != Material.COBWEB && head.getType() != Material.COBWEB) {
+            if (context.cobwebBreaking != null) {
+                clearWebStage();
+                context.cobwebBreaking = null;
+            }
             context.cobwebDefenseBreakTicks = 0;
             return false;
         }
@@ -1115,33 +1119,70 @@ public class CombatController {
             return true;
         }
 
-        int swordSlot = context.inventoryController.findBestSwordSlot(botPlayer);
-        if (swordSlot >= 0 && swordSlot <= 8) {
-            ItemStack offhandBackup = botPlayer.getInventory().getItemInOffHand().clone();
-            botPlayer.getInventory().setHeldItemSlot(swordSlot);
-            context.packetBroadcaster.broadcastEquipment();
-
-            Block breakLoc = feet.getType() == Material.COBWEB ? feet : head;
-
-            lookAtBlock(botPlayer, breakLoc);
-
-            context.bot.getHandle().swing(InteractionHand.MAIN_HAND, true);
-            context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
-
-            context.cobwebDefenseBreakTicks++;
-            if (context.cobwebDefenseBreakTicks >= context.cobwebBreakTarget) {
-                breakLoc.setType(Material.AIR);
-                context.cobwebDefenseBreakTicks = 0;
-                context.cobwebBreakTarget = 9 + java.util.concurrent.ThreadLocalRandom
-                        .current().nextInt(5);
+        // Cut our way out with the best thing we carry: shears are fastest,
+        // then a sword, and with neither, bare hands (slow, but never stuck
+        // waiting for a sword we don't have). The web cracks visibly as it
+        // goes, like a player breaking it.
+        Block breakLoc = feet.getType() == Material.COBWEB ? feet : head;
+        if (!breakLoc.equals(context.cobwebBreaking)) {
+            clearWebStage();
+            context.cobwebBreaking = breakLoc;
+            context.cobwebDefenseBreakTicks = 0;
+            int shears = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == Material.SHEARS);
+            int sword = shears >= 0 ? -1 : context.inventoryController.findBestSwordSlot(botPlayer);
+            int slot = shears >= 0 ? shears : sword;
+            java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+            if (slot >= 0 && slot <= 8) {
+                botPlayer.getInventory().setHeldItemSlot(slot);
+                context.packetBroadcaster.broadcastEquipment();
+                context.cobwebBreakTarget = (shears >= 0 ? 5 : 9) + rnd.nextInt(4);
+            } else {
+                context.cobwebBreakTarget = 30 + rnd.nextInt(10);
             }
-
-            botPlayer.getInventory().setItemInOffHand(offhandBackup);
-            context.packetBroadcaster.broadcastEquipment();
-            return true;
         }
 
+        lookAtBlock(botPlayer, breakLoc);
+        if (context.cobwebDefenseBreakTicks % 4 == 0) {
+            context.bot.getHandle().swing(InteractionHand.MAIN_HAND, true);
+            context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
+        }
+
+        context.cobwebDefenseBreakTicks++;
+        int stage = Math.min(9, context.cobwebDefenseBreakTicks * 10 / Math.max(1, context.cobwebBreakTarget));
+        if (stage != context.cobwebStage) {
+            context.cobwebStage = stage;
+            sendWebStage(breakLoc, stage);
+        }
+        if (context.cobwebDefenseBreakTicks >= context.cobwebBreakTarget) {
+            clearWebStage();
+            try {
+                breakLoc.getWorld().playSound(breakLoc.getLocation().add(0.5, 0.5, 0.5),
+                        org.bukkit.Sound.BLOCK_WOOL_BREAK, 1.0f, 1.0f);
+            } catch (Throwable ignored) {
+            }
+            breakLoc.setType(Material.AIR);
+            context.cobwebDefenseBreakTicks = 0;
+            context.cobwebBreaking = null;
+        }
         return true;
+    }
+
+    private void sendWebStage(Block b, int stage) {
+        try {
+            net.minecraft.server.level.ServerPlayer h = context.bot.getHandle();
+            if (h == null || b == null) return;
+            context.packetBroadcaster.sendPacketToAll(
+                    new net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket(
+                            h.getId(), new net.minecraft.core.BlockPos(b.getX(), b.getY(), b.getZ()), stage));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void clearWebStage() {
+        if (context.cobwebBreaking != null && context.cobwebStage >= 0) {
+            sendWebStage(context.cobwebBreaking, -1);
+        }
+        context.cobwebStage = -1;
     }
 
     public void handleWaterScoop(Player botPlayer) {
