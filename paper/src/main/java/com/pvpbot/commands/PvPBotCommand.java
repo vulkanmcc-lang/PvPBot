@@ -1176,6 +1176,45 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         String action = args.length >= 2 ? args[1].toLowerCase() : "list";
 
         switch (action) {
+            case "mark" -> {
+                if (args.length < 4) {
+                    sender.sendMessage("§cUsage: /pvpbot schematic mark <schematic> <voice name>");
+                    sender.sendMessage("§8  then say §7\"everyone build me a <voice name> here\"");
+                    return;
+                }
+                var s = mgr.get(args[2]);
+                if (s == null) {
+                    sender.sendMessage("§cCan't load '" + args[2] + "'§7: " + mgr.describeFailure(args[2]));
+                    return;
+                }
+                String voiceName = String.join(" ", java.util.Arrays.copyOfRange(args, 3, args.length));
+                plugin.getVoiceBuilds().mark(voiceName, args[2]);
+                sender.sendMessage("§aSay §f\"everyone build me a "
+                        + com.pvpbot.schem.VoiceBuilds.normalize(voiceName) + " here\"§a to build §e"
+                        + s.name + "§a (" + com.pvpbot.schem.SchematicPreview.describeSize(s) + ").");
+            }
+
+            case "unmark" -> {
+                if (args.length < 3) {
+                    sender.sendMessage("§cUsage: /pvpbot schematic unmark <voice name>");
+                    return;
+                }
+                String voiceName = String.join(" ", java.util.Arrays.copyOfRange(args, 2, args.length));
+                sender.sendMessage(plugin.getVoiceBuilds().unmark(voiceName)
+                        ? "§7Removed the voice build §f" + voiceName + "§7."
+                        : "§7No voice build called §f" + voiceName + "§7.");
+            }
+
+            case "marks" -> {
+                var all = plugin.getVoiceBuilds().all();
+                if (all.isEmpty()) {
+                    sender.sendMessage("§7No voice builds yet - §f/pvpbot schematic mark <schematic> <voice name>");
+                    return;
+                }
+                sender.sendMessage("§6§lVoice builds:");
+                all.forEach((k, v) -> sender.sendMessage("  §f\"" + k + "\" §7→ §e" + v));
+            }
+
             case "list" -> {
                 var names = mgr.list();
                 if (names.isEmpty()) {
@@ -3382,7 +3421,8 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 case "performance" -> completions.addAll(List.of("on", "off", "reset"));
 
                 case "schematic" ->
-                        completions.addAll(List.of("list", "info", "preview", "clear", "reload", "debug"));
+                        completions.addAll(List.of("list", "info", "preview", "clear", "reload", "debug",
+                                "mark", "unmark", "marks"));
                 case "path" -> completions.addAll(List.of("create", "point", "walk", "stop",
                         "list", "info", "loop", "delete", "status"));
                 case "attack" -> {
@@ -3435,9 +3475,12 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             }
 
             if (baseCmd.equals("schematic")
-                    && (secondArg.equals("info") || secondArg.equals("preview"))
+                    && (secondArg.equals("info") || secondArg.equals("preview") || secondArg.equals("mark"))
                     && plugin.getSchematicManager() != null) {
                 completions.addAll(plugin.getSchematicManager().list());
+            }
+            if (baseCmd.equals("schematic") && secondArg.equals("unmark") && plugin.getVoiceBuilds() != null) {
+                completions.addAll(plugin.getVoiceBuilds().all().keySet());
             }
 
             if (baseCmd.equals("faction")

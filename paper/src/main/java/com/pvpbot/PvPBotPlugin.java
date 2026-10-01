@@ -25,6 +25,7 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
     private BotManager botManager;
     private boolean warnedAboutKicks = false;
     private com.pvpbot.schem.SchematicManager schematicManager;
+    private com.pvpbot.schem.VoiceBuilds voiceBuilds;
     private com.pvpbot.route.RouteManager routeManager;
     private BotPersistence botPersistence;
 
@@ -85,6 +86,7 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
 
         botManager = new BotManager(this);
         schematicManager = new com.pvpbot.schem.SchematicManager(this);
+        voiceBuilds = new com.pvpbot.schem.VoiceBuilds(this);
         routeManager = new com.pvpbot.route.RouteManager(this);
         PvPBotVoiceChat.register(this);
         com.pvpbot.voice.VoiceLink.register(this);
@@ -598,6 +600,10 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
 
     public com.pvpbot.route.RouteManager getRouteManager() {
         return routeManager;
+    }
+
+    public com.pvpbot.schem.VoiceBuilds getVoiceBuilds() {
+        return voiceBuilds;
     }
 
     public com.pvpbot.schem.SchematicManager getSchematicManager() {

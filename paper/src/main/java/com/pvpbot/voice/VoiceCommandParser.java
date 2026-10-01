@@ -48,7 +48,8 @@ public final class VoiceCommandParser {
         ARMOR_WORST,// swap into the weakest
         MINE_TO,    // dig straight down (then across) to a player below
         SCATTER,    // everyone runs off in a different direction
-        ISLAND_BRIDGE // the End: bridge from this island to the nearest other one
+        ISLAND_BRIDGE, // the End: bridge from this island to the nearest other one
+        BUILD_SCHEM // "build me a <marked schematic> here"
     }
 
     // SELF: the speaker ("mine down to me").
@@ -227,6 +228,10 @@ public final class VoiceCommandParser {
             rule(Intent.BUILD_UP,
                     "build up", "build upwards", "pillar up", "pillar upwards", "tower up", "build a tower",
                     "build towers", "go up", "climb up", "get up high", "get up there", "get high"),
+            rule(Intent.BUILD_SCHEM,
+                    "build me a {p}", "build me an {p}", "build us a {p}", "build us an {p}",
+                    "make me a {p}", "make me an {p}", "make us a {p}", "build a {p}", "build an {p}",
+                    "build the {p}", "build me the {p}", "construct a {p}", "construct me a {p}"),
             rule(Intent.BOW,
                     "use your bows on {p}", "use bows on {p}", "bows on {p}", "bow on {p}",
                     "shoot at {p}", "shoot {p}", "bow {p}", "snipe {p}", "arrow {p}", "fire at {p}"),
@@ -249,6 +254,20 @@ public final class VoiceCommandParser {
     public static Parsed parse(String transcript, Collection<String> factions,
                                Collection<String> candidateNames) {
         return parse(transcript, factions, candidateNames, List.of());
+    }
+
+    // Voice-build names ("castle", "small house") for "build me a ... here";
+    // set per call by the overload that takes them.
+    private static final ThreadLocal<Collection<String>> BUILD_NAMES = ThreadLocal.withInitial(List::of);
+
+    public static Parsed parse(String transcript, Collection<String> factions, Collection<String> candidateNames,
+                               Collection<String> botNames, Collection<String> buildNames) {
+        BUILD_NAMES.set(buildNames == null ? List.of() : buildNames);
+        try {
+            return parse(transcript, factions, candidateNames, botNames);
+        } finally {
+            BUILD_NAMES.remove();
+        }
     }
 
     // botNames: bots the speaker may order individually ("Andy come here").
@@ -408,6 +427,22 @@ public final class VoiceCommandParser {
                                         boolean lookVerb, Collection<String> factions,
                                         Collection<String> names) {
         String heard = String.join(" ", words);
+
+        if (intent == Intent.BUILD_SCHEM) {
+            // "a castle here" / "the small house over there": the build's name
+            // is what's left without the filler.
+            List<String> nameWords = new ArrayList<>();
+            for (String w : words) {
+                if (!NAME_FILLER.contains(w) && !Set.of("me", "us", "for", "please", "right", "now").contains(w)) {
+                    nameWords.add(w);
+                }
+            }
+            if (nameWords.isEmpty() || nameWords.size() > 4) return null;
+            Collection<String> builds = BUILD_NAMES.get();
+            String match = builds.isEmpty() ? null : bestName(nameWords, builds);
+            return new Parsed(subject, addressed, intent, match != null ? TargetKind.NAME : TargetKind.NONE,
+                    match, String.join(" ", nameWords));
+        }
 
         if (intent == Intent.MINE_TO && !words.isEmpty() && words.size() <= 3
                 && (words.contains("me") || words.contains("my") || words.contains("us"))) {

@@ -318,6 +318,15 @@ public class BuildJob {
         jobTicks++;
         if ((jobTicks % 20) == 0) cleanOrphanedScaffold();
         if (isFinished()) return;
+        if (segmented) {
+            for (Task t : tasks) {
+                if (!t.done && t.owner != null && --t.leaseTicks <= 0) t.owner = null;
+            }
+            // Nothing claimable anywhere for a while (floating bits with no
+            // support yet): let them be placed against anything.
+            if (jobTicks - lastClaimTick > STALL_TICKS) relaxSupport = true;
+            return;
+        }
 
         boolean openBelow = false;
         boolean readyBelow = false;
@@ -369,6 +378,7 @@ public class BuildJob {
     public Task claim(UUID bot, Player botPlayer,
                       double botX, double botY, double botZ, Task avoid) {
         if (cancelled) return null;
+        if (segmented) return claimSegmented(bot, botPlayer, botX, botY, botZ, avoid);
 
         Task best = null;
         double bestDist = Double.MAX_VALUE;
@@ -473,6 +483,10 @@ public class BuildJob {
     }
 
     public Material nextNeededMaterial() {
+        if (segmented) {
+            for (Task t : tasks) if (!t.done && t.owner == null) return t.item;
+            return null;
+        }
         for (Task t : tasks) {
             if (t.done || t.owner != null) continue;
             if (t.y > currentLayer + 1) break;
@@ -524,6 +538,181 @@ public class BuildJob {
 
     public Map<Material, Integer> reserve() {
         return reserve;
+    }
+
+    // ---------------------------------------------------------------------
+    // Segmented building (voice builds): the footprint is cut into columns,
+    // each bot works its own column bottom-up, nobody waits for a global
+    // layer - a bot that can't do anything in its column just takes over
+    // another one. Blocks aren't handed out up front: a bot is given the
+    // block for a placement, in its hand, when it takes it on.
+    // ---------------------------------------------------------------------
+
+    private boolean segmented = false;
+    private boolean autoSupply = false;
+    private int segmentSize = 4;
+    private final Map<Long, List<Task>> segments = new HashMap<>();
+    private final Map<UUID, Long> segmentOf = new HashMap<>();
+    private int lastClaimTick = 0;
+
+    public void enableSegments(int size, boolean supplyOnClaim) {
+        segmented = true;
+        autoSupply = supplyOnClaim;
+        segmentSize = Math.max(2, size);
+        segments.clear();
+        for (Task t : tasks) {
+            long k = segKey(Math.floorDiv(t.x, segmentSize), Math.floorDiv(t.z, segmentSize));
+            segments.computeIfAbsent(k, kk -> new ArrayList<>()).add(t);
+        }
+        for (List<Task> l : segments.values()) l.sort(Comparator.comparingInt(t -> t.y));
+        lastClaimTick = jobTicks;
+    }
+
+    private static long segKey(int sx, int sz) {
+        return ((long) sx << 32) ^ (sz & 0xffffffffL);
+    }
+
+    private Task claimSegmented(UUID bot, Player botPlayer, double bx, double by, double bz, Task avoid) {
+        Long mine = segmentOf.get(bot);
+        Task pick = mine == null ? null : pickInSegment(segments.get(mine), bx, by, bz, avoid);
+        if (pick == null) {
+            // Our column is done or waiting on something: take the least
+            // crowded column that has work, nearest first.
+            Map<Long, Integer> workers = new HashMap<>();
+            for (Long seg : segmentOf.values()) workers.merge(seg, 1, Integer::sum);
+            Long bestSeg = null;
+            Task bestTask = null;
+            double bestScore = Double.MAX_VALUE;
+            for (Map.Entry<Long, List<Task>> e : segments.entrySet()) {
+                if (e.getKey().equals(mine)) continue;
+                Task t = pickInSegment(e.getValue(), bx, by, bz, avoid);
+                if (t == null) continue;
+                double dx = t.x + 0.5 - bx, dz = t.z + 0.5 - bz;
+                int w = workers.getOrDefault(e.getKey(), 0);
+                double score = w * 400.0 + dx * dx + dz * dz;
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestSeg = e.getKey();
+                    bestTask = t;
+                }
+            }
+            if (bestTask == null) return null;
+            segmentOf.put(bot, bestSeg);
+            pick = bestTask;
+        }
+        pick.owner = bot;
+        pick.leaseTicks = LEASE_TICKS;
+        lastClaimTick = jobTicks;
+        if (autoSupply && !hasItem(botPlayer, pick.item)) {
+            Long seg = segmentOf.get(bot);
+            int need = 0;
+            for (Task t : segments.get(seg)) if (!t.done && t.item == pick.item) need++;
+            supplyToHand(botPlayer, pick.item, Math.max(1, Math.min(need, pick.item.getMaxStackSize())));
+        }
+        return pick;
+    }
+
+    // In a column: the lowest open layer (and the one above it), supported,
+    // nearest to the bot.
+    private Task pickInSegment(List<Task> list, double bx, double by, double bz, Task avoid) {
+        if (list == null) return null;
+        int lowest = Integer.MAX_VALUE;
+        for (Task t : list) {
+            if (!t.done) {
+                lowest = t.y;
+                break;
+            }
+        }
+        if (lowest == Integer.MAX_VALUE) return null;
+        Task best = null;
+        double bestD = Double.MAX_VALUE;
+        for (Task t : list) {
+            if (t.y > lowest + 1) break;
+            if (t.done || t.owner != null || t == avoid) continue;
+            if (!isSupported(t)) continue;
+            double dx = t.x + 0.5 - bx, dy = t.y - by, dz = t.z + 0.5 - bz;
+            double d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) {
+                bestD = d;
+                best = t;
+            }
+        }
+        return best;
+    }
+
+    // Put `amount` of `m` straight into the bot's hand: the held slot if it's
+    // empty (or already that block), else an empty hotbar slot it switches
+    // to, else the held item moves to the backpack first.
+    public void supplyToHand(Player p, Material m, int amount) {
+        if (p == null || m == null || amount <= 0) return;
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        int held = inv.getHeldItemSlot();
+        ItemStack h = inv.getItem(held);
+        int stack = Math.min(amount, Math.max(1, m.getMaxStackSize()));
+        if (h == null || h.getType().isAir()) {
+            inv.setItem(held, new ItemStack(m, stack));
+            return;
+        }
+        if (h.getType() == m) {
+            h.setAmount(Math.min(m.getMaxStackSize(), h.getAmount() + stack));
+            return;
+        }
+        for (int i = 0; i < 9; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null || it.getType().isAir()) {
+                inv.setItem(i, new ItemStack(m, stack));
+                inv.setHeldItemSlot(i);
+                return;
+            }
+        }
+        int free = firstEmptyStorage(inv);
+        if (free < 0) {
+            freeASlot(p, m);
+            free = firstEmptyStorage(inv);
+        }
+        if (free >= 0) {
+            inv.setItem(free, h.clone());
+            inv.setItem(held, new ItemStack(m, stack));
+        } else {
+            giveItems(p, m, stack);
+        }
+    }
+
+    // Before a voice build: hold nothing (an empty hotbar slot, or the held
+    // item tucked into the backpack), so the blocks it's handed go to hand.
+    public void emptyMainHand(Player p) {
+        if (p == null) return;
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        int held = inv.getHeldItemSlot();
+        ItemStack h = inv.getItem(held);
+        if (h == null || h.getType().isAir()) return;
+        for (int i = 0; i < 9; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null || it.getType().isAir()) {
+                inv.setHeldItemSlot(i);
+                return;
+            }
+        }
+        int free = firstEmptyStorage(inv);
+        if (free >= 0) {
+            inv.setItem(free, h.clone());
+            inv.setItem(held, null);
+        } else {
+            reserve.merge(h.getType(), h.getAmount(), Integer::sum);
+            inv.setItem(held, null);
+        }
+    }
+
+    private static int firstEmptyStorage(org.bukkit.inventory.PlayerInventory inv) {
+        for (int i = 9; i < 36; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null || it.getType().isAir()) return i;
+        }
+        return -1;
+    }
+
+    public void leaveSegment(UUID bot) {
+        segmentOf.remove(bot);
     }
 
     private static int giveItems(Player p, Material m, int amount) {

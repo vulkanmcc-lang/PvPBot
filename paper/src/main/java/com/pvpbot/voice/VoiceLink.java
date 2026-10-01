@@ -202,8 +202,10 @@ public final class VoiceLink implements PluginMessageListener, Listener {
 
         List<String> ledNames = new ArrayList<>();
         for (PvPBot b : led) ledNames.add(ChatColor.stripColor(b.getName()));
+        java.util.Collection<String> buildNames = plugin.getVoiceBuilds() == null
+                ? List.of() : plugin.getVoiceBuilds().all().keySet();
         Parsed order = VoiceCommandParser.parse(transcript, manager.getFactionNames(),
-                candidateNames(manager, speaker), ledNames);
+                candidateNames(manager, speaker), ledNames, buildNames);
         if (order == null) {
             // Talking to the bots but no order we know: show what was heard
             // so a misrecognised word is easy to spot. Plain chatter stays
@@ -711,6 +713,35 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 ok(speaker, transcript, who + " → bridging to the next island, " + job.length()
                         + " blocks out (" + needed + " end stone, " + bots.size() + " builders)");
             }
+            case BUILD_SCHEM -> {
+                if (order.targetKind() != VoiceCommandParser.TargetKind.NAME) {
+                    fail(speaker, transcript, "no build called \"" + order.heardTarget()
+                            + "\" - /pvpbot schematic mark <schematic> <name>");
+                    return;
+                }
+                String schemName = plugin.getVoiceBuilds().schematicFor(order.target());
+                var schem = schemName == null || plugin.getSchematicManager() == null
+                        ? null : plugin.getSchematicManager().get(schemName);
+                if (schem == null) {
+                    fail(speaker, transcript, "can't load the schematic for \"" + order.target() + "\"");
+                    return;
+                }
+                if (com.pvpbot.schem.SchematicPreview.tooBig(schem)) {
+                    fail(speaker, transcript, order.target() + " is too big to build");
+                    return;
+                }
+                stopVoiceBuild(speaker.getUniqueId(), manager);
+                BuildRun old = buildRuns.remove(speaker.getUniqueId());
+                if (old != null) old.end(false);
+                int[] o = com.pvpbot.schem.SchematicPreview.originFor(speaker, schem);
+                BuildRun run = new BuildRun(speaker.getUniqueId(), schem, speaker.getWorld(), o[0], o[1], o[2],
+                        new ArrayList<>(bots), who, order.target());
+                buildRuns.put(speaker.getUniqueId(), run);
+                int toClear = run.start();
+                ok(speaker, transcript, who + " → building a " + order.target() + " here ("
+                        + com.pvpbot.schem.SchematicPreview.describeSize(schem) + ", " + bots.size() + " builders"
+                        + (toClear > 0 ? ", clearing " + toClear + " blocks first)" : ")"));
+            }
             case SCATTER -> {
                 int n = scatter(speaker, bots);
                 ok(speaker, transcript, who + " → scattering (" + n + ")");
@@ -782,6 +813,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         if (ctx.voiceHold) b.clearGuardPost();
         for (List<Crewed> list : followTasks.values()) removeFrom(list, b);
         removeFrom(lookTasks, b);
+        for (BuildRun run : buildRuns.values()) run.crew.remove(b);
         b.setForcedTarget(null);
         ctx.target = null;
     }
@@ -792,6 +824,113 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             if (c.crew.remove(b) && c.crew.isEmpty()) {
                 if (c.task != null) c.task.cancel();
                 it.remove();
+            }
+        }
+    }
+
+    // ---- voice builds: "build me a <name> here"
+
+    private final Map<UUID, BuildRun> buildRuns = new HashMap<>();
+
+    // One "build me a ..." order: clear the schematic's box of everything
+    // that isn't already right, then build it in segments.
+    private final class BuildRun {
+        final UUID speaker;
+        final com.pvpbot.schem.Schematic schem;
+        final World world;
+        final int ox, oy, oz;
+        final List<PvPBot> crew;
+        final String who, name;
+        com.pvpbot.mine.ExcavationJob clear;
+        com.pvpbot.schem.BuildJob build;
+        BukkitTask task;
+
+        BuildRun(UUID speaker, com.pvpbot.schem.Schematic schem, World world, int ox, int oy, int oz,
+                 List<PvPBot> crew, String who, String name) {
+            this.speaker = speaker;
+            this.schem = schem;
+            this.world = world;
+            this.ox = ox;
+            this.oy = oy;
+            this.oz = oz;
+            this.crew = crew;
+            this.who = who;
+            this.name = name;
+        }
+
+        // Returns how many blocks have to be cleared first.
+        int start() {
+            clear = com.pvpbot.mine.ExcavationJob.startClear(speaker, world, ox, oy, oz,
+                    ox + schem.width - 1, oy + schem.height - 1, oz + schem.length - 1,
+                    b -> {
+                        org.bukkit.block.data.BlockData want = schem.at(b.getX() - ox, b.getY() - oy, b.getZ() - oz);
+                        return want != null && !want.getMaterial().isAir() && b.getBlockData().matches(want);
+                    });
+            int n = clear.total();
+            if (n == 0) {
+                clear.cancel();
+                clear = null;
+                startBuilding();
+            } else {
+                for (PvPBot b : crew) {
+                    b.setForcedTarget(null);
+                    b.getAI().getContext().excavationController.join(clear);
+                }
+            }
+            task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
+            return n;
+        }
+
+        void tick() {
+            crew.removeIf(b -> !b.isAlive());
+            if (crew.isEmpty()) {
+                end(false);
+                return;
+            }
+            if (build == null) {
+                if (clear == null || clear.isFinished()) startBuilding();
+                return;
+            }
+            if (build.isCancelled()) {
+                end(false);
+                return;
+            }
+            if (build.isFinished()) end(true);
+        }
+
+        void startBuilding() {
+            if (clear != null) {
+                for (PvPBot b : crew) {
+                    var ec = b.getAI().getContext().excavationController;
+                    if (ec.job() == clear) ec.abort();
+                }
+                clear.cancel();
+            }
+            build = new com.pvpbot.schem.BuildJob(schem, world, ox, oy, oz, who);
+            build.enableSegments(4, true);
+            plugin.getBuildJobs().put(VOICE_BUILD_PREFIX + speaker, build);
+            for (PvPBot b : crew) {
+                Player bp = b.getBukkitPlayer();
+                if (bp != null) {
+                    build.emptyMainHand(bp);
+                    b.broadcastEquipment();
+                }
+                b.getAI().getContext().buildController.assign(build);
+            }
+            Player sp = Bukkit.getPlayer(speaker);
+            if (sp != null) {
+                sp.sendActionBar(Component.text("🎙 " + who + " → room cleared, building the " + name
+                        + " (" + build.total() + " blocks)", NamedTextColor.GREEN));
+            }
+        }
+
+        void end(boolean finished) {
+            if (task != null) task.cancel();
+            buildRuns.remove(speaker, this);
+            if (clear != null && !clear.isFinished()) clear.cancel();
+            Player sp = Bukkit.getPlayer(speaker);
+            if (finished && sp != null) {
+                sp.sendActionBar(Component.text("🎙 " + who + " → the " + name + " is done", NamedTextColor.GREEN));
             }
         }
     }

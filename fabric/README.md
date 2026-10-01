@@ -38,6 +38,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Tunnel | everyone tunnel this way *(each bot digs its own 32-long tunnel the way you face - side by side, some level, some ramping up, some down)* |
 | Build up | everyone build up · pillar up *(10 blocks up, every bot on its own column)* |
 | Path | everyone make a path there · build a bridge there *(covered 3-wide bridge with rails and a roof to the block you look at, up to 64 long; the bots share the work)* · stop building |
+| Build | everyone build me a *name* here *(a schematic you marked with `/pvpbot schematic mark <schematic> <name>` - the bots clear the space first, then build it column by column, each on its own part without waiting for the others; the block for each placement is put straight in their hand)* |
 | Look | everyone look at me *(bots within 5 blocks of you back off to ~6 first; then they all stay where they are and keep watching you until the next order)* |
 | Island bridge (End only) | everyone bridge to the next island · go to the next island *(finds the nearest other End island and bridges to it in end stone, 3 wide: the nearest bot leads out along the middle, sneaking, a block at a time; the rest fill the sides behind it. Bots don't push each other while bridging; one that falls anyway is put back on the bridge. "stop the bridge" stops it)* |
 | Scatter | everyone scatter · spread out · split up · run away *(every bot runs off in a different direction)* |

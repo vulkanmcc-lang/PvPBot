@@ -42,7 +42,7 @@ import java.util.UUID;
 // candidates only, and the "did something else clear it" sweep is spread
 // over 16 ticks.
 public final class ExcavationJob {
-    public enum Mode { MINE, DESTROY, TUNNEL, DIG_TO }
+    public enum Mode { MINE, DESTROY, TUNNEL, DIG_TO, CLEAR }
 
     public static final class Cell {
         public final int x, y, z;
@@ -226,6 +226,40 @@ public final class ExcavationJob {
         job.centerY = cy;
         job.centerZ = cz;
         job.scan(cx, cz);
+        register(job);
+        return job;
+    }
+
+    // Make room for a build: every block in the box that isn't already what
+    // the build wants there (`keep` says so) gets dug out, top down.
+    public static ExcavationJob startClear(UUID requester, World w, int minX, int minY, int minZ,
+                                           int maxX, int maxY, int maxZ,
+                                           java.util.function.Predicate<Block> keep) {
+        ExcavationJob job = new ExcavationJob(Mode.CLEAR, w, requester, MAX_DURATION_MS,
+                minX, minY, minZ, maxX, maxY, maxZ);
+        int cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+        job.centerX = cx;
+        job.centerY = minY;
+        job.centerZ = cz;
+        for (int y = maxY; y >= minY; y--) {
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    Block b = w.getBlockAt(x, y, z);
+                    if (!breakable(b.getType()) || keep.test(b)) continue;
+                    Cell c = new Cell(x, y, z);
+                    job.cells.add(c);
+                    job.byPos.put(key(x, y, z), c);
+                }
+            }
+        }
+        job.cells.sort(Comparator.comparingInt((Cell c) -> -c.y)
+                .thenComparingInt(c -> (c.x - cx) * (c.x - cx) + (c.z - cz) * (c.z - cz)));
+        job.areaCells.addAll(job.cells);
+        job.hasArea = true;
+        job.areaMinX = minX; job.areaMinY = minY; job.areaMinZ = minZ;
+        job.areaMaxX = maxX; job.areaMaxY = maxY; job.areaMaxZ = maxZ;
+        job.remaining = job.cells.size();
+        job.topY = job.cells.isEmpty() ? minY : job.cells.get(0).y;
         register(job);
         return job;
     }
