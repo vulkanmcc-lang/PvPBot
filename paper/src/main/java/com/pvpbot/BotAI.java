@@ -163,7 +163,8 @@ public class BotAI {
         context.attackCooldown = (int) Math.ceil(Math.max(0.0, (1.0f - charge) * chargeDelay));
         if (context.attackCooldown > 0) context.attackCooldown--;
 
-        if (context.target == null && context.movementController.handleBridgingGate(botPlayer)) {
+        if (context.target == null && !context.islandBridgeController.isActive()
+                && context.movementController.handleBridgingGate(botPlayer)) {
             finishTick(handle);
             return;
         }
@@ -287,6 +288,12 @@ public class BotAI {
 
         if (context.reachController.handleReach(botPlayer)) {
             context.navBranch = "REACH";
+            context.inventoryController.manageOffhand(botPlayer);
+            finishTick(handle);
+            return;
+        }
+
+        if (context.islandBridgeController.handle(botPlayer)) {
             context.inventoryController.manageOffhand(botPlayer);
             finishTick(handle);
             return;
@@ -795,7 +802,7 @@ public class BotAI {
                 || context.excavationController.isActive() || context.reachController.isActive()
                 || context.archerController.isActive() || context.buildController.isBusy()
                 || context.patrolController.isActive() || context.commanderController.isActive()
-                || context.climbOutController.isActive();
+                || context.climbOutController.isActive() || context.islandBridgeController.isActive();
         if (t == null || busy || context.fleeing || t.getWorld() != botPlayer.getWorld()) {
             context.unreachableTicks = 0;
             context.unreachableBest = Double.MAX_VALUE;

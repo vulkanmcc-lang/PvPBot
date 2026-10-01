@@ -261,6 +261,9 @@ public class BotAIContext {
     // Keep sinking in water instead of swimming up (excavation dive).
     public int waterSinkTicks = 0;
 
+    // Keep the sneak key held through physics (bridge building over the void).
+    public boolean holdSneak = false;
+
     // Stuck on a target we can't get to (under stone, behind walls): how
     // long, the closest we got, and a target we've given up on for now.
     public int unreachableTicks = 0;
@@ -631,6 +634,7 @@ public class BotAIContext {
     public ArcherController archerController;
     public CommanderController commanderController;
     public ClimbOutController climbOutController;
+    public IslandBridgeController islandBridgeController;
     public TechniqueController techniqueController;
     public CartController cartController;
     public TunnelController tunnelController;
@@ -724,6 +728,7 @@ public class BotAIContext {
         this.archerController = new ArcherController(this);
         this.commanderController = new CommanderController(this);
         this.climbOutController = new ClimbOutController(this);
+        this.islandBridgeController = new IslandBridgeController(this);
         this.techniqueController = new TechniqueController(this);
         this.cartController = new CartController(this);
         this.tunnelController = new TunnelController(this);

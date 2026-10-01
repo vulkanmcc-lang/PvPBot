@@ -538,16 +538,44 @@ public final class ExcavationJob {
         return walkers.size();
     }
 
-    // Send this bot off on its own wandering tunnel, starting where it
-    // stands and heading away from the middle of the area.
+    // Send this bot off on its own wandering tunnel. Explorers picked when
+    // the order is given start at the edge of the area (each on a different
+    // side, so you see them head off in different directions); bots that
+    // branch off later start from wherever they are in the pit.
+    private int edgeSideOffset = -1;
+
     public void addProspectorLane(UUID bot, Location from) {
+        addProspectorLane(bot, from, false);
+    }
+
+    public void addProspectorLane(UUID bot, Location from, boolean fromEdge) {
         int lane = nextLane++;
         Walker w = new Walker();
         w.x = from.getBlockX();
         w.y = from.getBlockY();
         w.z = from.getBlockZ();
-        int ddx = w.x - centerX, ddz = w.z - centerZ;
         java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+        if (fromEdge && hasArea) {
+            if (edgeSideOffset < 0) edgeSideOffset = rnd.nextInt(4);
+            int side = (edgeSideOffset + walkers.size()) % 4;
+            int ex, ez;
+            switch (side) {
+                case 0 -> { ex = areaMaxX + 1; ez = areaMinZ + rnd.nextInt(areaMaxZ - areaMinZ + 1); w.dx = 1; }
+                case 1 -> { ex = areaMinX - 1; ez = areaMinZ + rnd.nextInt(areaMaxZ - areaMinZ + 1); w.dx = -1; }
+                case 2 -> { ez = areaMaxZ + 1; ex = areaMinX + rnd.nextInt(areaMaxX - areaMinX + 1); w.dz = 1; }
+                default -> { ez = areaMinZ - 1; ex = areaMinX + rnd.nextInt(areaMaxX - areaMinX + 1); w.dz = -1; }
+            }
+            int top = world.getHighestBlockYAt(ex, ez) + 1;
+            w.x = ex;
+            w.z = ez;
+            w.y = Math.max(areaMinY, Math.min(areaMaxY + 2, top));
+            walkers.put(lane, w);
+            laneCells.put(lane, new ArrayList<>());
+            laneOf.put(bot, lane);
+            extendWalker(lane, w, true);
+            return;
+        }
+        int ddx = w.x - centerX, ddz = w.z - centerZ;
         if (ddx == 0 && ddz == 0) {
             int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
             int[] d = dirs[rnd.nextInt(4)];

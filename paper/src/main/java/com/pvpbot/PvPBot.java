@@ -671,6 +671,7 @@ public class PvPBot {
                 ai.getContext().reachController.stop();
                 ai.getContext().archerController.stop();
                 ai.getContext().commanderController.stop();
+                ai.getContext().islandBridgeController.abort();
             }
         } catch (Throwable ignored) {
         }

@@ -437,8 +437,34 @@ public class BuildController {
             placeBlock(botPlayer, handle, target);
             return;
         }
-        if (handle.onGround()) {
-            context.movementController.requestJump();
+        if (!handle.onGround()) return;
+        // Jumping to place under ourselves needs room above the head. With a
+        // low ceiling (or a refused jump) step off the cell instead and place
+        // it from beside - no 3-high space needed.
+        int feetY = (int) Math.floor(handle.getY() + 1.0e-3);
+        boolean lowCeiling = job.world.getBlockAt((int) Math.floor(handle.getX()), feetY + 2,
+                (int) Math.floor(handle.getZ())).getType().isSolid();
+        if (lowCeiling || !context.movementController.requestJump()) {
+            double ax = handle.getX() - (task.x + 0.5), az = handle.getZ() - (task.z + 0.5);
+            double al = Math.hypot(ax, az);
+            if (al < 0.05) {
+                // Dead centre: pick a side that has floor and room.
+                int[][] sides = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+                for (int[] sd : sides) {
+                    int sx = task.x + sd[0], sz = task.z + sd[1];
+                    if (job.world.getBlockAt(sx, feetY - 1, sz).getType().isSolid()
+                            && !job.world.getBlockAt(sx, feetY, sz).getType().isSolid()
+                            && !job.world.getBlockAt(sx, feetY + 1, sz).getType().isSolid()) {
+                        ax = sd[0];
+                        az = sd[1];
+                        al = 1.0;
+                        break;
+                    }
+                }
+            }
+            if (al >= 0.05) {
+                context.movementController.worldDirToInputs(handle, ax / al, az / al, 0.6f);
+            }
         }
     }
 

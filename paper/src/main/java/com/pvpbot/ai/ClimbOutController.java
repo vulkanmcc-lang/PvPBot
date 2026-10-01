@@ -141,6 +141,7 @@ public class ClimbOutController {
         if (context.buildController != null && context.buildController.isBusy()) return true;
         if (context.reachController != null && context.reachController.isActive()) return true;
         if (context.archerController != null && context.archerController.isActive()) return true;
+        if (context.islandBridgeController != null && context.islandBridgeController.isActive()) return true;
         if (context.tunnelController != null && context.tunnelController.isActive()) return true;
         if (context.miningController != null && context.miningController.isActive()) return true;
         if (context.areaMiningController != null && context.areaMiningController.isActive()) return true;

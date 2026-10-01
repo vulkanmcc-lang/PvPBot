@@ -146,7 +146,9 @@ public class MovementController {
 
         if (context.descendPearlCooldown > 0) context.descendPearlCooldown--;
 
-        if (!context.bridging && handle.isShiftKeyDown()) {
+        if (context.holdSneak) {
+            if (!handle.isShiftKeyDown()) handle.setShiftKeyDown(true);
+        } else if (!context.bridging && handle.isShiftKeyDown()) {
             handle.setShiftKeyDown(false);
         }
 

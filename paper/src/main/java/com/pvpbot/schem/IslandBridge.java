@@ -1,10 +1,8 @@
 package com.pvpbot.schem;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
-import org.bukkit.block.data.BlockData;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -32,15 +30,24 @@ public final class IslandBridge {
     public static final int MAX_LENGTH = 160;
     private static final int MAX_ISLAND_COLUMNS = 80000;
     private static final int MIN_ISLAND_COLUMNS = 8;
-    private static final double HALF_WIDTH = 1.0;
 
-    public record Plan(List<BuildJob.Placement> blocks, Location from, Location to, int length) {
+    // center: the walkway's middle line, one cell per step, every step a
+    // single cardinal move from the last (so a bot can always step onto the
+    // next block); index 0 is on the home island. sides: {x, y, z, index}
+    // - the two outer lanes beside center cell `index`.
+    public record Plan(List<int[]> center, List<int[]> sides, Location from, Location to, int length) {
+        public int blocksToPlace(World w) {
+            int n = 0;
+            for (int[] c : center) if (!w.getBlockAt(c[0], c[1], c[2]).getType().isSolid()) n++;
+            for (int[] c : sides) if (!w.getBlockAt(c[0], c[1], c[2]).getType().isSolid()) n++;
+            return n;
+        }
     }
 
     private IslandBridge() {
     }
 
-    public static Plan plan(Location at, Material material) {
+    public static Plan plan(Location at) {
         World w = at.getWorld();
         if (w == null) return null;
         int sx = at.getBlockX(), sz = at.getBlockZ();
@@ -103,26 +110,52 @@ public final class IslandBridge {
         double len = Math.hypot(to[0] - from[0], to[1] - from[1]);
         if (len < 2.0 || len > MAX_LENGTH) return null;
 
-        List<BuildJob.Placement> out = new ArrayList<>();
-        BlockData deck = Bukkit.createBlockData(material);
-        double ax = from[0] + 0.5, az = from[1] + 0.5;
-        double dx = (to[0] + 0.5 - ax) / len, dz = (to[1] + 0.5 - az) / len;
-        int minX = Math.min(from[0], to[0]) - 2, maxX = Math.max(from[0], to[0]) + 2;
-        int minZ = Math.min(from[1], to[1]) - 2, maxZ = Math.max(from[1], to[1]) + 2;
-        for (int x = minX; x <= maxX; x++) {
-            for (int z = minZ; z <= maxZ; z++) {
-                double rx = x + 0.5 - ax, rz = z + 0.5 - az;
-                double t = rx * dx + rz * dz;
-                double across = Math.abs(rx * -dz + rz * dx);
-                if (t < -0.5 || t > len + 0.5 || across > HALF_WIDTH) continue;
-                int y = fy + PathPlan.deckRise(Math.max(0.0, t), len, ty - fy);
-                if (y <= w.getMinHeight() || y >= w.getMaxHeight() - 1) continue;
-                if (w.getBlockAt(x, y, z).getType().isSolid()) continue;
-                out.add(new BuildJob.Placement(x, y, z, deck.clone()));
+        // Centre line: a 4-connected walk that stays as close as possible to
+        // the straight line.
+        int tx = to[0], tz = to[1];
+        int totX = Math.abs(tx - from[0]), totZ = Math.abs(tz - from[1]);
+        List<int[]> cols = new ArrayList<>();
+        int x = from[0], z = from[1];
+        cols.add(new int[]{x, z});
+        while (x != tx || z != tz) {
+            int remX = Math.abs(tx - x), remZ = Math.abs(tz - z);
+            // Step along whichever axis is further behind its share.
+            if (remZ == 0 || (remX > 0 && (long) remX * Math.max(1, totZ) >= (long) remZ * Math.max(1, totX))) {
+                x += Integer.signum(tx - x);
+            } else {
+                z += Integer.signum(tz - z);
+            }
+            cols.add(new int[]{x, z});
+        }
+        int steps = cols.size() - 1;
+        List<int[]> center = new ArrayList<>();
+        java.util.Set<Long> centerKeys = new HashSet<>();
+        for (int i = 0; i < cols.size(); i++) {
+            int y = fy + PathPlan.deckRise(i, Math.max(1, steps), ty - fy);
+            center.add(new int[]{cols.get(i)[0], y, cols.get(i)[1]});
+            centerKeys.add(key3(cols.get(i)[0], y, cols.get(i)[1]));
+        }
+        // Side lanes across the main direction.
+        boolean alongX = totX >= totZ;
+        int ox = alongX ? 0 : 1, oz = alongX ? 1 : 0;
+        List<int[]> sides = new ArrayList<>();
+        java.util.Set<Long> sideKeys = new HashSet<>();
+        for (int i = 0; i < center.size(); i++) {
+            int[] c = center.get(i);
+            for (int sgn = -1; sgn <= 1; sgn += 2) {
+                int sx2 = c[0] + ox * sgn, sz2 = c[2] + oz * sgn;
+                long k = key3(sx2, c[1], sz2);
+                if (centerKeys.contains(k) || !sideKeys.add(k)) continue;
+                if (c[1] <= w.getMinHeight() || c[1] >= w.getMaxHeight() - 1) continue;
+                sides.add(new int[]{sx2, c[1], sz2, i});
             }
         }
-        return new Plan(out, new Location(w, from[0] + 0.5, fy + 1, from[1] + 0.5),
+        return new Plan(center, sides, new Location(w, from[0] + 0.5, fy + 1, from[1] + 0.5),
                 new Location(w, to[0] + 0.5, ty + 1, to[1] + 0.5), (int) Math.round(len));
+    }
+
+    private static long key3(int x, int y, int z) {
+        return ((long) (x & 0x3FFFFFF) << 38) | ((long) (y & 0xFFF) << 26) | (z & 0x3FFFFFF);
     }
 
     // The square ring at Chebyshev distance r (its perimeter only).

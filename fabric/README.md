@@ -39,7 +39,7 @@ Give PvPBot bots orders by talking in Simple Voice Chat.
 | Build up | everyone build up · pillar up *(10 blocks up, every bot on its own column)* |
 | Path | everyone make a path there · build a bridge there *(covered 3-wide bridge with rails and a roof to the block you look at, up to 64 long; the bots share the work)* · stop building |
 | Look | everyone look at me |
-| Island bridge (End only) | everyone bridge to the next island · go to the next island *(finds the nearest other End island and builds a 3-wide cobblestone - or netherrack, whichever they carry more of - bridge to it from the closest edge; blocks are handed out; "stop the bridge" stops it)* |
+| Island bridge (End only) | everyone bridge to the next island · go to the next island *(finds the nearest other End island and bridges to it in end stone, 3 wide: the nearest bot leads out along the middle, sneaking, a block at a time; the rest fill the sides behind it. Bots don't push each other while bridging; one that falls anyway is put back on the bridge. "stop the bridge" stops it)* |
 | Scatter | everyone scatter · spread out · split up · run away *(every bot runs off in a different direction)* |
 | One bot | start with its name: *Andy come here* · *Nexar Void follow me* · *Kevin kill Steve* |
 | Commander | commander kill *name* *(the commander walks up to you, nods, then goes for them)* · commander come here · red commander kill *name*. Pick one with `/pvpbot faction commander <faction> <bot>` |

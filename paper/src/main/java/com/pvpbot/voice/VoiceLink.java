@@ -235,7 +235,9 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         // the new order wipes it.
         int wasDigging = 0;
         boolean wasDestroying = false;
+        boolean wasBridging = false;
         for (PvPBot b : bots) {
+            if (b.getAI().getContext().islandBridgeController.isActive()) wasBridging = true;
             var ec = b.getAI().getContext().excavationController;
             if (ec.isActive()) {
                 wasDigging++;
@@ -570,7 +572,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     b.setForcedTarget(null);
                     b.getAI().getContext().excavationController.join(job);
                     Player bp = b.getBukkitPlayer();
-                    if (bp != null && explorers.contains(b)) job.addProspectorLane(b.getUUID(), bp.getLocation());
+                    if (bp != null && explorers.contains(b)) job.addProspectorLane(b.getUUID(), bp.getLocation(), true);
                     if (bp == null) continue;
                     if (com.pvpbot.ai.ExcavationController.hasTntKit(bp)) tnt++;
                     for (org.bukkit.inventory.ItemStack it : bp.getInventory().getStorageContents()) {
@@ -644,51 +646,35 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     fail(speaker, transcript, "island bridging only works in the End");
                     return;
                 }
-                // Bridge with what they carry most of: netherrack or
-                // cobblestone (they're handed whatever the bridge needs).
-                int netherrack = 0, cobble = 0;
-                for (PvPBot b : bots) {
-                    Player bp = b.getBukkitPlayer();
-                    if (bp == null) continue;
-                    for (org.bukkit.inventory.ItemStack it : bp.getInventory().getStorageContents()) {
-                        if (it == null) continue;
-                        if (it.getType() == org.bukkit.Material.NETHERRACK) netherrack += it.getAmount();
-                        else if (it.getType() == org.bukkit.Material.COBBLESTONE) cobble += it.getAmount();
-                    }
-                }
-                org.bukkit.Material mat = netherrack > cobble
-                        ? org.bukkit.Material.NETHERRACK : org.bukkit.Material.COBBLESTONE;
                 com.pvpbot.schem.IslandBridge.Plan plan =
-                        com.pvpbot.schem.IslandBridge.plan(speaker.getLocation(), mat);
+                        com.pvpbot.schem.IslandBridge.plan(speaker.getLocation());
                 if (plan == null) {
                     fail(speaker, transcript, "no other island within "
                             + com.pvpbot.schem.IslandBridge.SEARCH_RADIUS + " blocks");
                     return;
                 }
-                if (plan.blocks().isEmpty()) {
+                int needed = plan.blocksToPlace(speaker.getWorld());
+                if (needed == 0) {
                     fail(speaker, transcript, "that island is already connected");
                     return;
                 }
-                stopVoiceBuild(speaker.getUniqueId(), manager);
-                String key = VOICE_BUILD_PREFIX + speaker.getUniqueId();
-                Location from = plan.from();
-                com.pvpbot.schem.BuildJob job = com.pvpbot.schem.BuildJob.fromPlacements(
-                        "island bridge", speaker.getWorld(), plan.blocks(),
-                        from.getBlockX(), from.getBlockY() - 1, from.getBlockZ(), who);
-                List<Player> crewPlayers = new ArrayList<>();
-                for (PvPBot b : bots) {
+                com.pvpbot.ai.IslandBridgeController.Job job = com.pvpbot.ai.IslandBridgeController.start(
+                        speaker.getUniqueId(), speaker.getWorld(), plan);
+                int each = needed / Math.max(1, bots.size()) + 16;
+                // Nearest bot to the bridge start leads.
+                List<PvPBot> order = new ArrayList<>(bots);
+                Location start = plan.from();
+                order.sort(java.util.Comparator.comparingDouble(b -> {
                     Player bp = b.getBukkitPlayer();
-                    if (bp != null) crewPlayers.add(bp);
-                }
-                job.distribute(crewPlayers, job.bill());
-                plugin.getBuildJobs().put(key, job);
-                for (PvPBot b : bots) {
+                    return bp == null || bp.getWorld() != start.getWorld()
+                            ? Double.MAX_VALUE : bp.getLocation().distanceSquared(start);
+                }));
+                for (PvPBot b : order) {
                     b.setForcedTarget(null);
-                    b.getAI().getContext().buildController.assign(job);
+                    b.getAI().getContext().islandBridgeController.join(job, each);
                 }
-                ok(speaker, transcript, who + " → bridging to the next island, " + plan.length()
-                        + " blocks out (" + job.total() + " " + mat.name().toLowerCase() + ", "
-                        + bots.size() + " builders)");
+                ok(speaker, transcript, who + " → bridging to the next island, " + job.length()
+                        + " blocks out (" + needed + " end stone, " + bots.size() + " builders)");
             }
             case SCATTER -> {
                 int n = scatter(speaker, bots);
@@ -700,7 +686,8 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 // speaker has other bots working on keep going.
                 int stopped = wasDigging;
                 boolean destroying = wasDestroying;
-                boolean building = stopVoiceBuild(speaker.getUniqueId(), manager);
+                boolean building = stopVoiceBuild(speaker.getUniqueId(), manager)
+                        | com.pvpbot.ai.IslandBridgeController.stop(speaker.getUniqueId()) | wasBridging;
                 if (building && stopped == 0) {
                     ok(speaker, transcript, who + " → stopped building");
                     return;
@@ -746,6 +733,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         ctx.archerController.stop();
         ctx.commanderController.stop();
         ctx.climbOutController.stop();
+        ctx.islandBridgeController.abort();
         ctx.excavationController.abort();
         if (ctx.patrolController.isActive()) ctx.patrolController.stop();
         if (ctx.areaMiningController.isActive()) ctx.areaMiningController.abort();
