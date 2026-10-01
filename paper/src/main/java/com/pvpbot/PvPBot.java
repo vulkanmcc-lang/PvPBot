@@ -113,6 +113,15 @@ public class PvPBot {
         if (ai == null || slot == null) return;
         ai.getContext().formationSlot = slot.clone();
         ai.getContext().formationTicks = ticks;
+        ai.getContext().formationRun = false;
+    }
+
+    // Sprint off to a spot (scatter): same as a formation order, but the bot
+    // runs flat out, shield down, and doesn't fuss over the exact block.
+    public void orderRunTo(org.bukkit.Location dest, int ticks) {
+        if (ai == null || dest == null) return;
+        orderToFormationSlot(dest, ticks);
+        ai.getContext().formationRun = true;
     }
 
     public PvPBot(Location location, PvPBotPlugin plugin, BotSettings settings) {

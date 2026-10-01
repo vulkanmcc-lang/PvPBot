@@ -1154,7 +1154,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         for (int i = 0; i < n; i++) {
             PvPBot b = crew.get(i);
             double a = base + 2.0 * Math.PI * i / n + (rnd.nextDouble() - 0.5) * 0.3;
-            double dist = 14.0 + rnd.nextDouble() * 8.0;
+            double dist = 24.0 + rnd.nextDouble() * 12.0;
             double ox = crew.size() == 1 ? b.getBukkitPlayer().getLocation().getX() : mx;
             double oz = crew.size() == 1 ? b.getBukkitPlayer().getLocation().getZ() : mz;
             int x = (int) Math.floor(ox + Math.cos(a) * dist);
@@ -1163,7 +1163,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
             int y = groundNear(w, x, z, nearY);
             Location dest = new Location(w, x + 0.5, y, z + 0.5);
             dest.setYaw((float) Math.toDegrees(Math.atan2(-Math.cos(a), Math.sin(a))));
-            b.orderToFormationSlot(dest, SCATTER_TICKS);
+            b.orderRunTo(dest, SCATTER_TICKS);
             sent++;
         }
         return sent;

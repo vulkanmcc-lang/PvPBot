@@ -1862,7 +1862,22 @@ public class MovementController {
             return false;
         }
 
+        // This branch takes the tick before combat/inventory upkeep runs, so
+        // anything combat left on - a raised shield (which also blocks the
+        // sprint and drops the bot to a crawl), an s-tap, a build/reach
+        // sprint ban from an earlier tick - would ride along the whole way.
+        context.inventoryController.releaseShield(botPlayer);
+        context.suppressSprint = false;
+        context.sTapActive = false;
+        context.sTapTimer = 0;
+
         double distance = slot.distance(botPlayer.getLocation());
+        if (context.formationRun && distance < 2.0) {
+            context.forwardInput = 0f;
+            context.strafeInput = 0f;
+            clearFormationOrder();
+            return true;
+        }
         if (distance < 0.9) {
             context.forwardInput = 0f;
             context.strafeInput = 0f;
@@ -1942,6 +1957,7 @@ public class MovementController {
     public void clearFormationOrder() {
         context.formationSlot = null;
         context.formationTicks = 0;
+        context.formationRun = false;
         context.currentPath.clear();
         context.pathNodeIndex = 0;
     }

@@ -511,6 +511,9 @@ public class BotAIContext {
 
     public org.bukkit.Location formationSlot = null;
     public int formationTicks = 0;
+    // The order is "get away" (scatter), not "stand in your slot": sprint
+    // the whole way and count anywhere close as arrived.
+    public boolean formationRun = false;
 
     public int regroupTicks = 0;
 
