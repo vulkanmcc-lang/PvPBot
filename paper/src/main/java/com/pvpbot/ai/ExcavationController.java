@@ -771,6 +771,13 @@ public class ExcavationController {
         return true;
     }
 
+    // Hotbar slot of the block to plug water with. Plugs are building too:
+    // end stone only.
+    private int sealSlot(Player botPlayer) {
+        return context.inventoryController.ensureInHotbar(botPlayer,
+                it -> it.getType() == InventoryController.BUILD_BLOCK);
+    }
+
     // In water inside the job (or right at its edge) with something diggable
     // under the water: time to go under it.
     private boolean shouldDive(Player botPlayer) {
