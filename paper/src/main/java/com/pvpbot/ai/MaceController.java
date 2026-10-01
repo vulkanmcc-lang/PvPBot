@@ -1,7 +1,6 @@
 package com.pvpbot.ai;
 
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.InteractionHand;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -87,7 +86,9 @@ public class MaceController {
     private static final double ELYTRA_RELEASE_RANGE = 6.0;
     private static final int ELYTRA_ALIGN_TICKS = 8;
 
-    private static final int ELYTRA_ROCKET_INTERVAL = 18;
+    // Floor between rockets when the rocket entity couldn't be tracked
+    // (a flight-1 rocket burns ~20-30 ticks).
+    private static final int ELYTRA_ROCKET_INTERVAL = 22;
 
     private static final double PEARL_GRAPPLE_MIN_HEIGHT = 4.0;
     private static final double PEARL_GRAPPLE_MAX_HEIGHT = 30.0;
@@ -99,16 +100,8 @@ public class MaceController {
 
     private static final int MAX_ROCKETS_PER_RUN = 5;
 
-    private static final double ELYTRA_CLIMB_POWER = 1.8;
-    private static final double ELYTRA_DIVE_POWER = 1.6;
 
     private static final float ELYTRA_CLIMB_PITCH = -70.0f;
-
-    private static final int ROCKET_BURN_TICKS = 14;
-
-    private static final double ROCKET_THRUST = 0.16;
-
-    private static final double ROCKET_MAX_SPEED = 1.7;
 
     private Launch activeLaunch = Launch.NONE;
     private ElytraPhase elytraPhase = ElytraPhase.NONE;
@@ -122,8 +115,8 @@ public class MaceController {
     private int slamDrivenTick = Integer.MIN_VALUE;
     private int slamWaitTicks = 0;
     private int slamSwingRetries = 0;
-    private int rocketBurnTicks = 0;
-    private Vector rocketThrust = null;
+    // The rocket currently pulling us (null once it burns out).
+    private org.bukkit.entity.Projectile activeRocket = null;
 
     public MaceController(BotAIContext context) {
         this.context = context;
@@ -370,10 +363,8 @@ public class MaceController {
         int slot = context.inventoryController.findWindChargeSlot(botPlayer);
         if (slot < 0 || slot > 8) return false;
 
+        if (VanillaUse.coolingDown(botPlayer, slot)) return false;
         context.movementController.requestJump();
-
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
 
         // Straight down, or tilted back from the target so the blast also
         // carries the bot toward them.
@@ -392,21 +383,9 @@ public class MaceController {
         float shotPitch = (float) Math.toDegrees(Math.asin(-shot.getY()));
         float shotYaw = shot.getX() == 0 && shot.getZ() == 0 ? handle.getYRot()
                 : (float) Math.toDegrees(Math.atan2(-shot.getX(), shot.getZ()));
-        context.requestLook(shotYaw, shotPitch, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        try {
-            botPlayer.launchProjectile(org.bukkit.entity.WindCharge.class, shot.multiply(1.5));
-        } catch (Throwable t) {
-            return false;
-        }
-
-        consumeOne(botPlayer, slot);
-        return true;
+        // A real right click: vanilla speed and spread, and the half-second
+        // wind charge cooldown (no more back-to-back charges).
+        return VanillaUse.useFromHotbar(context, botPlayer, slot, shotYaw, shotPitch).used();
     }
 
     private boolean launchWithPearl(Player botPlayer, ServerPlayer handle) {
@@ -417,8 +396,6 @@ public class MaceController {
         if (slot < 0 || slot > 8) return false;
 
         int previousSlot = botPlayer.getInventory().getHeldItemSlot();
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
 
         Location eye = botPlayer.getEyeLocation();
         Location aim = target.getLocation().clone().add(0.0, PEARL_GRAPPLE_LEAD, 0.0);
@@ -430,22 +407,14 @@ public class MaceController {
 
         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
         float pitch = (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.1, flat)));
-        context.requestLook(yaw, pitch, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
 
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        try {
-            botPlayer.launchProjectile(org.bukkit.entity.EnderPearl.class);
-        } catch (Throwable t) {
-            botPlayer.getInventory().setHeldItemSlot(previousSlot);
-            context.packetBroadcaster.broadcastEquipment();
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) {
+            if (botPlayer.getInventory().getHeldItemSlot() != previousSlot) {
+                botPlayer.getInventory().setHeldItemSlot(previousSlot);
+                context.packetBroadcaster.broadcastEquipment();
+            }
             return false;
         }
-
-        consumeOne(botPlayer, slot);
         context.pearlCooldown = PEARL_GRAPPLE_COOLDOWN;
         return true;
     }
@@ -454,15 +423,15 @@ public class MaceController {
         if (!hasRocket(botPlayer)) return false;
         if (!context.inventoryController.equipElytraForMace(botPlayer)) return false;
 
+        // Jump now; the glide opens on a second jump press once airborne
+        // (ensureGliding), like a player double-tapping space.
         context.movementController.requestJump();
-        startGliding(botPlayer);
 
         elytraPhase = ElytraPhase.CLIMB;
         elytraPhaseTicks = 0;
         rocketCooldown = 0;
         rocketsUsed = 0;
-        rocketBurnTicks = 0;
-        rocketThrust = null;
+        activeRocket = null;
         return true;
     }
 
@@ -471,16 +440,20 @@ public class MaceController {
         if (target == null) return;
 
         if (rocketCooldown > 0) rocketCooldown--;
-        tickRocketBurn(botPlayer);
+        if (activeRocket != null && !activeRocket.isValid()) activeRocket = null;
         elytraPhaseTicks++;
 
         double above = handle.getY() - target.getLocation().getY();
 
         switch (elytraPhase) {
             case CLIMB -> {
-                ensureGliding(botPlayer);
+                if (!ensureGliding(botPlayer, handle)) {
+                    if (elytraPhaseTicks > 20) cancel(botPlayer);
+                    return;
+                }
                 if (above < ELYTRA_CLIMB_HEIGHT) {
-                    boostRocket(botPlayer, climbAim(handle), ELYTRA_CLIMB_POWER);
+                    float[] climb = climbAim(handle);
+                    boostRocket(botPlayer, handle, climb[0], climb[1]);
                     return;
                 }
                 stopGliding(botPlayer, true);
@@ -497,12 +470,21 @@ public class MaceController {
                     cancel(botPlayer);
                     return;
                 }
-                startGliding(botPlayer);
+                // Opening the glide needs us off the ground - landed during
+                // the align means the dive is off.
+                if (!VanillaUse.startGlide(handle)) {
+                    cancel(botPlayer);
+                    return;
+                }
                 elytraPhase = ElytraPhase.DIVE;
                 elytraPhaseTicks = 0;
             }
             case DIVE -> {
-                ensureGliding(botPlayer);
+                if (!ensureGliding(botPlayer, handle)) {
+                    elytraPhase = ElytraPhase.FALL;
+                    equipMace(botPlayer);
+                    return;
+                }
                 aimAtTarget(handle);
 
                 if (distance <= ELYTRA_RELEASE_RANGE || above <= 4.0) {
@@ -513,11 +495,10 @@ public class MaceController {
                     return;
                 }
 
-                Vector toTarget = target.getLocation().toVector()
-                        .subtract(botPlayer.getLocation().toVector());
-                if (toTarget.lengthSquared() > 0.01) {
-                    boostRocket(botPlayer, toTarget.normalize(), ELYTRA_DIVE_POWER);
-                }
+                // A rocket pulls along the look direction, so look where we
+                // want to go - straight at them.
+                float[] dive = anglesTo(handle, target.getLocation().clone().add(0, 1.0, 0));
+                boostRocket(botPlayer, handle, dive[0], dive[1]);
             }
             case FALL -> {
                 equipMace(botPlayer);
@@ -530,82 +511,66 @@ public class MaceController {
         return context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET) >= 0;
     }
 
-    private void boostRocket(Player botPlayer, Vector direction, double power) {
-        if (rocketCooldown > 0) return;
+    // A real firework rocket: right click it mid-glide and the rocket entity
+    // pulls the bot along wherever it's looking for its whole flight, exactly
+    // like a player's boost. The next one goes up once it has burned out.
+    private void boostRocket(Player botPlayer, ServerPlayer handle, float yaw, float pitch) {
+        if (!handle.isFallFlying()) return;
+        if (rocketCooldown > 0 || activeRocket != null) return;
         if (rocketsUsed >= MAX_ROCKETS_PER_RUN) return;
-        if (direction.lengthSquared() < 1.0E-6) return;
 
         int slot = context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET);
-        if (slot < 0) return;
+        if (slot < 0 || slot > 8) return;
 
-        rocketThrust = direction.clone().normalize().multiply(ROCKET_THRUST * power);
-        rocketBurnTicks = ROCKET_BURN_TICKS;
-
-        try {
-            botPlayer.getWorld().playSound(botPlayer.getLocation(),
-                    org.bukkit.Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, 1.0f, 1.0f);
-        } catch (Throwable ignored) {
-        }
-
-        consumeOne(botPlayer, slot);
+        VanillaUse.Result r = VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch);
+        if (!r.used()) return;
+        activeRocket = r.projectile();
         rocketsUsed++;
         rocketCooldown = ELYTRA_ROCKET_INTERVAL;
     }
 
-    private void tickRocketBurn(Player botPlayer) {
-        if (rocketBurnTicks <= 0 || rocketThrust == null) {
-            rocketThrust = null;
-            return;
-        }
-        rocketBurnTicks--;
-
-        Vector v = botPlayer.getVelocity().add(rocketThrust);
-        if (v.lengthSquared() > ROCKET_MAX_SPEED * ROCKET_MAX_SPEED) {
-            v.normalize().multiply(ROCKET_MAX_SPEED);
-        }
-        botPlayer.setVelocity(v);
-
-        if (rocketBurnTicks <= 0) rocketThrust = null;
-    }
-
-    private Vector climbAim(ServerPlayer handle) {
+    // {yaw, pitch} for the climb: steep up, heading their way.
+    private float[] climbAim(ServerPlayer handle) {
         Player target = context.target;
-        double dx = 0.0;
-        double dz = 0.0;
+        float yaw = handle.getYRot();
         if (target != null) {
-            dx = target.getLocation().getX() - handle.getX();
-            dz = target.getLocation().getZ() - handle.getZ();
-            double flat = Math.sqrt(dx * dx + dz * dz);
-            if (flat > 0.001) {
-                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-                context.requestLook(yaw, ELYTRA_CLIMB_PITCH, BotAIContext.LOOK_CRITICAL, false);
-                dx /= flat;
-                dz /= flat;
-            }
+            double dx = target.getLocation().getX() - handle.getX();
+            double dz = target.getLocation().getZ() - handle.getZ();
+            if (dx * dx + dz * dz > 1.0E-6) yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
         }
-        return new Vector(dx * 0.25, 1.0, dz * 0.25);
+        // Above the windup's aim-at-target: the rocket pulls along the look,
+        // so the climb has to actually be looking up.
+        context.requestLook(yaw, ELYTRA_CLIMB_PITCH, BotAIContext.LOOK_CRITICAL + 1, false);
+        return new float[]{yaw, ELYTRA_CLIMB_PITCH};
     }
 
-    private void startGliding(Player botPlayer) {
-        try {
-            botPlayer.setGliding(true);
-        } catch (Throwable ignored) {
-        }
+    private static float[] anglesTo(ServerPlayer handle, Location at) {
+        double dx = at.getX() - handle.getX();
+        double dy = at.getY() - (handle.getY() + handle.getEyeHeight());
+        double dz = at.getZ() - handle.getZ();
+        double flat = Math.sqrt(dx * dx + dz * dz);
+        return new float[]{
+                (float) Math.toDegrees(Math.atan2(-dx, dz)),
+                (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.1, flat)))};
     }
 
-    private void ensureGliding(Player botPlayer) {
-        if (!context.elytraEquippedForMace) return;
-        try {
-            if (!botPlayer.isGliding()) botPlayer.setGliding(true);
-        } catch (Throwable ignored) {
+    // Keep the glide going; if it dropped, press jump again in mid-air like
+    // a player would. On the ground the jump comes first (the glide opens
+    // next tick). False = not gliding this tick.
+    private boolean ensureGliding(Player botPlayer, ServerPlayer handle) {
+        if (handle.isFallFlying()) return true;
+        if (!context.elytraEquippedForMace
+                && !context.inventoryController.equipElytraForMace(botPlayer)) return false;
+        if (handle.onGround()) {
+            context.movementController.requestJump();
+            return false;
         }
+        return VanillaUse.startGlide(handle);
     }
 
+    // Players can't just stop gliding - they swap the elytra off (hotbar
+    // chestplate swap), and the glide ends the moment it's gone.
     private void stopGliding(Player botPlayer, boolean unequip) {
-        try {
-            botPlayer.setGliding(false);
-        } catch (Throwable ignored) {
-        }
         if (unequip) context.inventoryController.unequipElytraForMace(botPlayer);
     }
 
@@ -1032,14 +997,6 @@ public class MaceController {
         return true;
     }
 
-    private void consumeOne(Player botPlayer, int slot) {
-        ItemStack item = botPlayer.getInventory().getItem(slot);
-        if (item == null || item.getAmount() <= 0) return;
-        item.setAmount(item.getAmount() - 1);
-        botPlayer.getInventory().setItem(slot, item.getAmount() > 0 ? item : null);
-        context.packetBroadcaster.broadcastEquipment();
-    }
-
     private void clearWindCharge() {
         if (context.maceWindCharge != null) {
             try {
@@ -1053,10 +1010,6 @@ public class MaceController {
 
     private void restoreElytra(Player botPlayer) {
         if (!context.elytraEquippedForMace) return;
-        try {
-            botPlayer.setGliding(false);
-        } catch (Throwable ignored) {
-        }
         context.inventoryController.unequipElytraForMace(botPlayer);
     }
 
@@ -1071,8 +1024,7 @@ public class MaceController {
         elytraPhaseTicks = 0;
         rocketCooldown = 0;
         rocketsUsed = 0;
-        rocketBurnTicks = 0;
-        rocketThrust = null;
+        activeRocket = null;
         chainsUsed = 0;
         restoreWeapon(botPlayer);
         context.maceWindupTicks = 0;
@@ -1115,8 +1067,7 @@ public class MaceController {
         elytraPhaseTicks = 0;
         rocketCooldown = 0;
         rocketsUsed = 0;
-        rocketBurnTicks = 0;
-        rocketThrust = null;
+        activeRocket = null;
 
         equipMace(botPlayer);
         return true;
@@ -1137,8 +1088,7 @@ public class MaceController {
         elytraPhaseTicks = 0;
         rocketCooldown = 0;
         rocketsUsed = 0;
-        rocketBurnTicks = 0;
-        rocketThrust = null;
+        activeRocket = null;
         chainsUsed = 0;
         restoreWeapon(botPlayer);
         context.maceWindupTicks = 0;

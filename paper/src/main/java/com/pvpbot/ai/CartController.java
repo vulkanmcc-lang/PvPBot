@@ -161,7 +161,7 @@ public class CartController {
         if (!hasItem(botPlayer, Material.BOW) && !hasItem(botPlayer, Material.CROSSBOW)) return false;
 
         int slot = findSlot(botPlayer, Material.ENDER_PEARL);
-        if (slot < 0) return false;
+        if (slot < 0 || slot > 8) return false;
 
         if (java.util.concurrent.ThreadLocalRandom.current().nextDouble() >= AGRO_CHANCE) {
             return false;
@@ -173,29 +173,15 @@ public class CartController {
         ServerPlayer handle = context.bot.getHandle();
         Location eye = botPlayer.getEyeLocation();
         Location aim = target.getLocation().clone().add(0, 1.0, 0);
-        org.bukkit.util.Vector vel = computeLaunchVector(eye, aim, 1.9, 0.03, false);
-        if (vel == null) vel = eye.getDirection().multiply(1.9);
+        // Solved for a vanilla pearl throw (1.5 speed), then thrown as a
+        // real right click.
+        org.bukkit.util.Vector vel = computeLaunchVector(eye, aim, 1.5, 0.03, false);
+        if (vel == null) vel = eye.getDirection().multiply(1.5);
 
-        context.requestLook(
-                (float) Math.toDegrees(Math.atan2(-vel.getX(), vel.getZ())),
-                (float) Math.toDegrees(-Math.atan2(vel.getY(),
-                        Math.hypot(vel.getX(), vel.getZ()))),
-                BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
-
-        try {
-            org.bukkit.entity.EnderPearl pearl =
-                    botPlayer.launchProjectile(org.bukkit.entity.EnderPearl.class);
-            pearl.setVelocity(vel);
-            pearl.setShooter(botPlayer);
-        } catch (Throwable t) {
-            return false;
-        }
-
-        consumeOne(botPlayer, slot);
-        handle.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
+        float yaw = (float) Math.toDegrees(Math.atan2(-vel.getX(), vel.getZ()));
+        float pitch = (float) Math.toDegrees(-Math.atan2(vel.getY(),
+                Math.hypot(vel.getX(), vel.getZ())));
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) return false;
 
         context.agroCartCooldown = AGRO_COOLDOWN;
         context.agroCartWindow = AGRO_WINDOW;

@@ -79,29 +79,7 @@ public class MovementController {
         float pitch = Math.max(-70f, flatPitch - (float) Math.min(25.0, horiz * 1.1));
         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
-        context.requestLook(yaw, pitch, BotAIContext.LOOK_CRITICAL, true);
-        flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        try {
-            botPlayer.launchProjectile(org.bukkit.entity.EnderPearl.class);
-        } catch (Throwable t) {
-            return false;
-        }
-
-
-        ItemStack pearl = botPlayer.getInventory().getItem(slot);
-        if (pearl != null) {
-            pearl.setAmount(pearl.getAmount() - 1);
-            botPlayer.getInventory().setItem(slot, pearl.getAmount() > 0 ? pearl : null);
-            context.packetBroadcaster.broadcastEquipment();
-        }
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) return false;
 
         context.descendPearlCooldown = DESCEND_PEARL_COOLDOWN;
         return true;
@@ -241,15 +219,28 @@ public class MovementController {
             context.shouldJumpThisTick = false;
         }
 
-        boolean movingForward = forward > 0.1f;
-        boolean canSprint = movingForward
-                && context.settings.isSprint()
+        // Vanilla client sprint rules: starting a sprint takes (nearly) full
+        // forward input, a running sprint keeps going while still moving
+        // forward, and walking head-on into a wall, blindness, a low hunger
+        // bar, sneaking or using an item all drop it.
+        boolean blind;
+        try {
+            blind = handle.hasEffect(net.minecraft.world.effect.MobEffects.BLINDNESS);
+        } catch (Throwable t) {
+            blind = false;
+        }
+        boolean wallBlocked = handle.horizontalCollision && !handle.minorHorizontalCollision;
+        boolean sprintAllowed = context.settings.isSprint()
                 && !context.suppressSprint
                 && !context.eating
                 && context.drinkingPotionTimer <= 0
                 && !handle.isShiftKeyDown()
                 && !handle.isUsingItem()
+                && !blind
+                && !wallBlocked
                 && handle.getFoodData().getFoodLevel() > 6;
+        boolean canSprint = sprintAllowed
+                && (handle.isSprinting() ? forward > 1.0e-5f : forward >= 0.8f);
         handle.setSprinting(canSprint);
 
         float verticalSwim = handleWaterMovement(handle, botPlayerRef, forward, strafe);
@@ -1602,6 +1593,8 @@ public class MovementController {
         float pitch = Math.max(78.0f,
                 Math.min(87.0f, (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.25, horiz)))));
 
+        if (VanillaUse.coolingDown(botPlayer, slot)) return false;
+
         botPlayer.getInventory().setHeldItemSlot(slot);
         context.packetBroadcaster.broadcastEquipment();
 
@@ -1617,15 +1610,7 @@ public class MovementController {
 
         context.forwardInput = 0.0f;
         context.strafeInput = 0.0f;
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        org.bukkit.inventory.ItemStack charge = botPlayer.getInventory().getItem(slot);
-        if (charge != null && charge.getType() == Material.WIND_CHARGE) {
-            botPlayer.launchProjectile(org.bukkit.entity.WindCharge.class);
-            charge.setAmount(charge.getAmount() - 1);
-            botPlayer.getInventory().setItem(slot, charge.getAmount() > 0 ? charge : null);
-        }
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) return false;
 
         context.holeEscapeCooldown = 40;
         context.currentPath.clear();

@@ -1012,21 +1012,11 @@ public class BotAI {
             botPlayer.getInventory().setHeldItemSlot(slot);
             context.packetBroadcaster.broadcastEquipment();
         } else if (context.splashPotionTimer == 2) {
-            handle.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
-            context.packetBroadcaster.broadcastAnimation(handle, 0);
-
+            // Thrown the vanilla way (half the speed of a pearl, angled
+            // up a bit) - it used to fly out 3x too fast.
             org.bukkit.inventory.ItemStack potItem = botPlayer.getInventory().getItem(slot);
             if (potItem != null && potItem.getType() == org.bukkit.Material.SPLASH_POTION) {
-                org.bukkit.entity.SplashPotion thrown =
-                        botPlayer.launchProjectile(org.bukkit.entity.SplashPotion.class);
-                thrown.setItem(potItem);
-                thrown.setVelocity(botPlayer.getLocation().getDirection().multiply(1.5));
-
-                thrown.setGravity(true);
-
-                potItem.setAmount(potItem.getAmount() - 1);
-                botPlayer.getInventory().setItem(
-                        slot, potItem.getAmount() > 0 ? potItem : null);
+                com.pvpbot.ai.VanillaUse.useFromHotbar(context, botPlayer, slot, handle.getYRot(), 90.0f);
             }
         } else if (context.splashPotionTimer == 0) {
             // isInvisible() catches both a real potion effect and the

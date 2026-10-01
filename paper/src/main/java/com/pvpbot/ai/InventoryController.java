@@ -443,12 +443,10 @@ public class InventoryController {
             // No "&& !willAttack" here: trading a swing for a mace smash is
             // always a losing trade, and CombatController holds the swing.
             if (threatBlock) {
-                if (!handle.isUsingItem()) {
-                    handle.startUsingItem(net.minecraft.world.InteractionHand.OFF_HAND);
-                    context.packetBroadcaster.broadcastEntityData();
-                }
+                raiseShield(handle);
                 return;
             }
+            context.shieldReactDelay = -1;
             if (!consuming && handle.isUsingItem()) {
                 handle.stopUsingItem();
                 context.packetBroadcaster.broadcastEntityData();
@@ -457,8 +455,10 @@ public class InventoryController {
         }
 
         if (inMelee && t.isSprinting() && closing && context.enemyPredictCooldown <= 0) {
-            context.shieldPredictTicks = 4;
-            context.shieldHoldTicks = 3;
+            // Long enough to cover the reaction delay before it goes up.
+            int react = Math.max(0, context.settings.getReactionTicks()) + 2;
+            context.shieldPredictTicks = 4 + react;
+            context.shieldHoldTicks = 3 + react;
             context.enemyPredictCooldown = 15
                     + java.util.concurrent.ThreadLocalRandom.current().nextInt(10);
         }
@@ -476,11 +476,37 @@ public class InventoryController {
 
 
 
-        if (holdShield && !handle.isUsingItem()) {
-            handle.startUsingItem(net.minecraft.world.InteractionHand.OFF_HAND);
-            context.packetBroadcaster.broadcastEntityData();
-        } else if (!holdShield && !consuming && handle.isUsingItem()) {
-            handle.stopUsingItem();
+        if (holdShield) {
+            raiseShield(handle);
+        } else {
+            context.shieldReactDelay = -1;
+            if (!consuming && handle.isUsingItem()) {
+                handle.stopUsingItem();
+                context.packetBroadcaster.broadcastEntityData();
+            }
+        }
+    }
+
+    // Shield up, but only after the bot's reaction time has passed since it
+    // first wanted it up - a player sees the threat, then their finger
+    // moves. (On top of that the shield itself takes a quarter second to
+    // start blocking, which vanilla enforces.) Raised through a real right
+    // click, so a shield on cooldown from an axe hit stays down.
+    private void raiseShield(net.minecraft.server.level.ServerPlayer handle) {
+        if (handle.isUsingItem()) {
+            context.shieldReactDelay = -1;
+            return;
+        }
+        if (context.shieldReactDelay < 0) {
+            context.shieldReactDelay = Math.max(0, context.settings.getReactionTicks())
+                    + java.util.concurrent.ThreadLocalRandom.current().nextInt(3);
+        }
+        if (context.shieldReactDelay > 0) {
+            context.shieldReactDelay--;
+            return;
+        }
+        context.shieldReactDelay = -1;
+        if (VanillaUse.use(handle, net.minecraft.world.InteractionHand.OFF_HAND).used()) {
             context.packetBroadcaster.broadcastEntityData();
         }
     }
@@ -534,9 +560,10 @@ public class InventoryController {
                 ticks = 16;
             } else if (above > 2.5 && horiz < 6.0 && carriesMace(p)) {
                 ticks = 12;
-            } else if (above > 1.0 && horiz < 2.5) {
-                ticks = 6;
             } else {
+                // Just someone jumping near us (a crit jump, a hop) isn't a
+                // smash - raising for every jump blocked crits with zero
+                // reaction time, which no player can do.
                 continue;
             }
 

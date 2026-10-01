@@ -123,10 +123,8 @@ public class ClutchController {
 
     private boolean tryWindClutch(Player botPlayer, ServerPlayer handle) {
         int slot = context.inventoryController.findWindChargeSlot(botPlayer);
-        if (slot < 0) return false;
-        if (slot <= 8) botPlayer.getInventory().setHeldItemSlot(slot);
+        if (slot < 0 || slot > 8) return false;
 
-        aimStraightDown(handle);
         if (!launchWindCharge(botPlayer, slot, handle)) return false;
 
         clutchCooldown = CLUTCH_COOLDOWN;
@@ -143,10 +141,8 @@ public class ClutchController {
         if (context.target == null && !context.isGuarding() && context.currentPath.isEmpty()) return;
 
         int slot = context.inventoryController.findWindChargeSlot(botPlayer);
-        if (slot < 0) return;
-        if (slot <= 8) botPlayer.getInventory().setHeldItemSlot(slot);
+        if (slot < 0 || slot > 8) return;
 
-        aimStraightDown(handle);
         if (!launchWindCharge(botPlayer, slot, handle)) return;
 
         context.forwardInput = 1.0f;
@@ -159,25 +155,9 @@ public class ClutchController {
         ItemStack charge = botPlayer.getInventory().getItem(slot);
         if (charge == null || charge.getType() != Material.WIND_CHARGE) return false;
 
-        try {
-            botPlayer.launchProjectile(org.bukkit.entity.WindCharge.class);
-        } catch (Throwable t) {
-            return false;
-        }
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        charge.setAmount(charge.getAmount() - 1);
-        botPlayer.getInventory().setItem(slot, charge.getAmount() > 0 ? charge : null);
-        context.packetBroadcaster.broadcastEquipment();
-        return true;
-    }
-
-    private void aimStraightDown(ServerPlayer handle) {
-        context.requestLook(handle.getYRot(), 90.0f, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
+        // Straight down, as a real right click (vanilla speed, spread and
+        // the half-second wind charge cooldown).
+        return VanillaUse.useFromHotbar(context, botPlayer, slot, handle.getYRot(), 90.0f).used();
     }
 
     private double distanceToFloor(World w, Location loc) {

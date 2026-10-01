@@ -283,7 +283,12 @@ public class HealingController {
         if (food < 0 || food > 8) return;
 
         botPlayer.getInventory().setHeldItemSlot(food);
-        context.bot.getHandle().startUsingItem(InteractionHand.MAIN_HAND);
+        // A real right click: food only goes down when vanilla lets you eat
+        // (not on a full hunger bar, unless it's always-edible like a gapple).
+        if (!VanillaUse.use(context.bot.getHandle(), InteractionHand.MAIN_HAND).used()) {
+            context.packetBroadcaster.broadcastEquipment();
+            return;
+        }
         context.eating = true;
         context.eatChainCooldown = EAT_CHAIN_COOLDOWN;
         context.eatCommitTicks = EAT_COMMIT_TICKS;
@@ -496,26 +501,13 @@ public class HealingController {
         botPlayer.getInventory().setHeldItemSlot(slot);
         context.packetBroadcaster.broadcastEquipment();
 
-        context.requestLook(handle.getYRot(), 90.0f, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        try {
-            botPlayer.launchProjectile(org.bukkit.entity.WindCharge.class);
-        } catch (Throwable t) {
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, handle.getYRot(), 90.0f).used()) {
             botPlayer.getInventory().setHeldItemSlot(previousSlot);
             context.packetBroadcaster.broadcastEquipment();
             return false;
         }
 
         ItemStack stack = botPlayer.getInventory().getItem(slot);
-        if (stack != null) {
-            stack.setAmount(stack.getAmount() - 1);
-            botPlayer.getInventory().setItem(slot, stack.getAmount() > 0 ? stack : null);
-        }
         botPlayer.getInventory().setHeldItemSlot(
                 stack != null && stack.getAmount() > 0 ? previousSlot
                         : context.inventoryController.findBestWeaponSlot(botPlayer));
@@ -558,24 +550,17 @@ public class HealingController {
 
         int previousSlot = botPlayer.getInventory().getHeldItemSlot();
 
-        context.requestLook(yaw, pitch, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-        context.packetBroadcaster.broadcastRotation(handle);
-
-        handle.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        org.bukkit.entity.EnderPearl pearl =
-                botPlayer.launchProjectile(org.bukkit.entity.EnderPearl.class);
-        pearl.setVelocity(botPlayer.getLocation().getDirection().multiply(1.5));
+        // Vanilla throw: pearl speed + spread, our momentum carried in, and
+        // the one-second pearl cooldown.
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) {
+            if (botPlayer.getInventory().getHeldItemSlot() != previousSlot) {
+                botPlayer.getInventory().setHeldItemSlot(previousSlot);
+                context.packetBroadcaster.broadcastEquipment();
+            }
+            return false;
+        }
 
         ItemStack stack = botPlayer.getInventory().getItem(slot);
-        if (stack != null) {
-            stack.setAmount(stack.getAmount() - 1);
-            botPlayer.getInventory().setItem(slot, stack.getAmount() > 0 ? stack : null);
-        }
         botPlayer.getInventory().setHeldItemSlot(
                 stack != null && stack.getAmount() > 0 ? previousSlot
                         : context.inventoryController.findBestWeaponSlot(botPlayer));
@@ -597,24 +582,17 @@ public class HealingController {
         ServerPlayer handle = context.bot.getHandle();
         int previousSlot = botPlayer.getInventory().getHeldItemSlot();
 
-        context.requestLook(awayYaw, -32.0f, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-        context.packetBroadcaster.broadcastRotation(handle);
-
-        handle.swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        org.bukkit.entity.EnderPearl pearl =
-                botPlayer.launchProjectile(org.bukkit.entity.EnderPearl.class);
-        pearl.setVelocity(botPlayer.getLocation().getDirection().multiply(1.5));
+        // Vanilla throw: pearl speed + spread, our momentum carried in, and
+        // the one-second pearl cooldown.
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, awayYaw, -32.0f).used()) {
+            if (botPlayer.getInventory().getHeldItemSlot() != previousSlot) {
+                botPlayer.getInventory().setHeldItemSlot(previousSlot);
+                context.packetBroadcaster.broadcastEquipment();
+            }
+            return false;
+        }
 
         ItemStack stack = botPlayer.getInventory().getItem(slot);
-        if (stack != null) {
-            stack.setAmount(stack.getAmount() - 1);
-            botPlayer.getInventory().setItem(slot, stack.getAmount() > 0 ? stack : null);
-        }
 
         botPlayer.getInventory().setHeldItemSlot(
                 stack != null && stack.getAmount() > 0 ? previousSlot
@@ -684,7 +662,10 @@ public class HealingController {
         context.drinkingPotionSlot = slot;
         context.drinkingIsRegen = (regenSlot != -1);
 
-        context.bot.getHandle().startUsingItem(InteractionHand.MAIN_HAND);
+        if (!VanillaUse.use(context.bot.getHandle(), InteractionHand.MAIN_HAND).used()) {
+            context.drinkingPotionSlot = -1;
+            return false;
+        }
 
         context.drinkingPotionTimer =
                 Math.max(1, context.bot.getHandle().getUseItemRemainingTicks());
@@ -808,26 +789,9 @@ public class HealingController {
             context.potionOffhandPreserved = true;
         }
 
-        context.requestLook(handle.getYRot(), 90.0f, BotAIContext.LOOK_CRITICAL, true);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
         ItemStack potItem = botPlayer.getInventory().getItem(slot);
         if (potItem != null && potItem.getType() == Material.SPLASH_POTION) {
-            org.bukkit.entity.SplashPotion thrown =
-                    botPlayer.launchProjectile(org.bukkit.entity.SplashPotion.class);
-            thrown.setItem(potItem);
-            thrown.setVelocity(botPlayer.getLocation().getDirection().multiply(1.5));
-
-            thrown.setGravity(true);
-
-            potItem.setAmount(potItem.getAmount() - 1);
-            botPlayer.getInventory().setItem(slot, potItem.getAmount() > 0 ? potItem : null);
+            VanillaUse.useFromHotbar(context, botPlayer, slot, handle.getYRot(), 90.0f);
         }
 
         context.pendingPotionSlot = slot;
@@ -899,7 +863,10 @@ public class HealingController {
         context.packetBroadcaster.broadcastEquipment();
         context.drinkingPotionSlot = drink;
         context.drinkingIsRegen = false;
-        context.bot.getHandle().startUsingItem(InteractionHand.MAIN_HAND);
+        if (!VanillaUse.use(context.bot.getHandle(), InteractionHand.MAIN_HAND).used()) {
+            context.drinkingPotionSlot = -1;
+            return false;
+        }
         context.drinkingPotionTimer =
                 Math.max(1, context.bot.getHandle().getUseItemRemainingTicks());
         context.packetBroadcaster.broadcastEntityData();

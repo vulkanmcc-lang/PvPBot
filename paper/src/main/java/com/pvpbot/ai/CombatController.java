@@ -268,29 +268,29 @@ public class CombatController {
 
     private static final int ELYTRA_APPROACH_COOLDOWN = 160;
     private static final int ELYTRA_APPROACH_MAX_TICKS = 120;
-    private static final int ELYTRA_APPROACH_BURN = 14;
-    private static final double ELYTRA_APPROACH_THRUST = 0.14;
-    private static final double ELYTRA_APPROACH_MAX_SPEED = 1.6;
+    // Floor between rockets when the rocket entity couldn't be tracked.
+    private static final int ELYTRA_APPROACH_BURN = 22;
 
     private boolean startElytraApproach(Player botPlayer) {
         if (!context.inventoryController.equipElytraForMace(botPlayer)) return false;
-        if (context.inventoryController.findItemSlot(
-                botPlayer, Material.FIREWORK_ROCKET) < 0) {
+        int rocket = context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET);
+        if (rocket < 0 || rocket > 8) {
             context.inventoryController.unequipElytraForMace(botPlayer);
             return false;
         }
 
+        // Jump; the glide opens on the next jump press in mid-air.
         context.movementController.requestJump();
-        try {
-            botPlayer.setGliding(true);
-        } catch (Throwable ignored) {
-        }
 
         context.elytraApproachTicks = ELYTRA_APPROACH_MAX_TICKS;
         context.elytraApproachBurn = 0;
         context.elytraApproachCooldown = ELYTRA_APPROACH_COOLDOWN;
+        elytraApproachRocket = null;
         return true;
     }
+
+    // The rocket pulling us in, while it burns.
+    private org.bukkit.entity.Projectile elytraApproachRocket = null;
 
     public boolean driveElytraApproach(Player botPlayer) {
         if (context.elytraApproachTicks <= 0) return false;
@@ -309,62 +309,56 @@ public class CombatController {
             return false;
         }
 
-        try {
-            if (!botPlayer.isGliding()) botPlayer.setGliding(true);
-        } catch (Throwable ignored) {
+        if (!handle.isFallFlying()) {
+            if (handle.onGround()) {
+                // Never got off the ground (or landed): one more hop, then give up.
+                if (ELYTRA_APPROACH_MAX_TICKS - context.elytraApproachTicks > 12) {
+                    endElytraApproach(botPlayer);
+                    return false;
+                }
+                context.movementController.requestJump();
+                return true;
+            }
+            if (!VanillaUse.startGlide(handle)) {
+                endElytraApproach(botPlayer);
+                return false;
+            }
         }
 
         org.bukkit.util.Vector toTarget = target.getLocation().toVector()
-                .subtract(botPlayer.getLocation().toVector());
+                .add(new org.bukkit.util.Vector(0, 1.0, 0))
+                .subtract(botPlayer.getEyeLocation().toVector());
         if (toTarget.lengthSquared() < 0.01) return true;
         toTarget.normalize();
 
         double flat = Math.hypot(toTarget.getX(), toTarget.getZ());
-        context.requestLook(
-                (float) Math.toDegrees(Math.atan2(-toTarget.getX(), toTarget.getZ())),
-                (float) Math.toDegrees(-Math.atan2(toTarget.getY(), Math.max(0.05, flat))),
-                BotAIContext.LOOK_CRITICAL, false);
+        float yaw = (float) Math.toDegrees(Math.atan2(-toTarget.getX(), toTarget.getZ()));
+        float pitch = (float) Math.toDegrees(-Math.atan2(toTarget.getY(), Math.max(0.05, flat)));
+        context.requestLook(yaw, pitch, BotAIContext.LOOK_CRITICAL, false);
 
-        if (context.elytraApproachBurn > 0) {
-            context.elytraApproachBurn--;
-            org.bukkit.util.Vector v = botPlayer.getVelocity()
-                    .add(toTarget.clone().multiply(ELYTRA_APPROACH_THRUST));
-            if (v.lengthSquared() > ELYTRA_APPROACH_MAX_SPEED * ELYTRA_APPROACH_MAX_SPEED) {
-                v.normalize().multiply(ELYTRA_APPROACH_MAX_SPEED);
-            }
-            botPlayer.setVelocity(v);
-            return true;
-        }
+        if (elytraApproachRocket != null && !elytraApproachRocket.isValid()) elytraApproachRocket = null;
+        if (context.elytraApproachBurn > 0) context.elytraApproachBurn--;
+        if (elytraApproachRocket != null || context.elytraApproachBurn > 0) return true;
 
-        int rocket = context.inventoryController.findItemSlot(
-                botPlayer, Material.FIREWORK_ROCKET);
-        if (rocket < 0) {
+        // A real rocket: it pulls along our look for its whole flight.
+        int rocket = context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET);
+        if (rocket < 0 || rocket > 8) {
             endElytraApproach(botPlayer);
             return false;
         }
-
-        context.elytraApproachBurn = ELYTRA_APPROACH_BURN;
-        try {
-            botPlayer.getWorld().playSound(botPlayer.getLocation(),
-                    org.bukkit.Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, 1.0f, 1.0f);
-        } catch (Throwable ignored) {
-        }
-        ItemStack stack = botPlayer.getInventory().getItem(rocket);
-        if (stack != null) {
-            stack.setAmount(stack.getAmount() - 1);
-            botPlayer.getInventory().setItem(rocket, stack.getAmount() > 0 ? stack : null);
-            context.packetBroadcaster.broadcastEquipment();
+        VanillaUse.Result r = VanillaUse.useFromHotbar(context, botPlayer, rocket, yaw, pitch);
+        if (r.used()) {
+            elytraApproachRocket = r.projectile();
+            context.elytraApproachBurn = ELYTRA_APPROACH_BURN;
         }
         return true;
     }
 
+    // Swapping the elytra off is how a player ends a glide.
     private void endElytraApproach(Player botPlayer) {
         context.elytraApproachTicks = 0;
         context.elytraApproachBurn = 0;
-        try {
-            botPlayer.setGliding(false);
-        } catch (Throwable ignored) {
-        }
+        elytraApproachRocket = null;
         context.inventoryController.unequipElytraForMace(botPlayer);
     }
 
@@ -944,6 +938,7 @@ public class CombatController {
 
             int hurtBefore = nmsTarget.hurtTime;
             float healthBefore = nmsTarget.getHealth();
+            float absorptionBefore = nmsTarget.getAbsorptionAmount();
             boolean targetWasBlocking = InventoryController.isBlockingWithShield(context.target);
             net.minecraft.world.item.ItemStack blockingStack = null;
             if (targetWasBlocking) {
@@ -960,16 +955,21 @@ public class CombatController {
 
             handle.attack(nmsTarget);
 
-            if (targetWasBlocking && InventoryController.isAxe(weapon)) {
+            boolean landed = nmsTarget.hurtTime > hurtBefore
+                    || nmsTarget.getHealth() < healthBefore;
+
+            // Only a shield that actually stopped the axe gets disabled (as in
+            // vanilla) - a hit around it, from the side or behind, doesn't.
+            // (A blocked hit still starts the hurt timer, so go by damage.)
+            boolean tookDamage = nmsTarget.getHealth() < healthBefore
+                    || nmsTarget.getAbsorptionAmount() < absorptionBefore;
+            if (targetWasBlocking && !tookDamage && InventoryController.isAxe(weapon)) {
                 disableTargetShield(nmsTarget, blockingStack);
             }
 
             handle.resetAttackStrengthTicker();
             context.ticksSinceSwing = 0;
             context.attackCooldown = context.inventoryController.attackCooldownFor(weapon);
-
-            boolean landed = nmsTarget.hurtTime > hurtBefore
-                    || nmsTarget.getHealth() < healthBefore;
 
             if (landed) {
                 context.lastLandedAttackTick = context.tickCounter;

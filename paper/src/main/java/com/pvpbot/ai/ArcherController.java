@@ -4,14 +4,10 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.Sound;
 import org.bukkit.enchantments.Enchantment;
-import org.bukkit.entity.AbstractArrow;
-import org.bukkit.entity.Arrow;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
-import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.util.Vector;
 
 import java.util.UUID;
@@ -171,9 +167,29 @@ public class ArcherController {
         }
         boolean crossbow = botPlayer.getInventory().getItem(slot).getType() == Material.CROSSBOW;
 
+        // Everything below is a real right click / release: vanilla works out
+        // the arrow's power from how long it was drawn, picks the ammo, and
+        // applies Power/Flame/Punch/Infinity/Multishot/Piercing, durability
+        // and the shot sound - same as a player's bow.
+        if (crossbow && crossbowLoaded(handle)) {
+            drawing = false;
+            if (shotCooldown > 0 || !sight || !onTarget || dist > MAX_RANGE + 6) return true;
+            float[] shot = withAimError(aim);
+            VanillaUse.face(context, handle, shot[0], shot[1]);
+            if (VanillaUse.use(handle, InteractionHand.MAIN_HAND).used()) {
+                handle.swing(InteractionHand.MAIN_HAND, true);
+                context.packetBroadcaster.broadcastAnimation(handle, 0);
+                context.packetBroadcaster.broadcastEquipment();
+                shotCooldown = 10;
+            }
+            return true;
+        }
+
         if (!drawing) {
-            if (shotCooldown <= 0 && sight && dist <= MAX_RANGE + 6) {
-                handle.startUsingItem(InteractionHand.MAIN_HAND);
+            // A crossbow gets loaded whenever it's empty (no need to see them
+            // yet); a bow is only drawn when there's a shot coming.
+            boolean wantDraw = crossbow || (shotCooldown <= 0 && sight && dist <= MAX_RANGE + 6);
+            if (wantDraw && VanillaUse.use(handle, InteractionHand.MAIN_HAND).used()) {
                 context.packetBroadcaster.broadcastEntityData();
                 drawing = true;
                 drawTicks = 0;
@@ -181,7 +197,23 @@ public class ArcherController {
             return true;
         }
 
+        if (!handle.isUsingItem()) {
+            // Something else took the hands (a swap, a hit that cancelled it).
+            drawing = false;
+            return true;
+        }
+
         drawTicks++;
+        if (crossbow) {
+            // Hold until fully charged, then let go - that's what loads it.
+            if (drawTicks >= CROSSBOW_DRAW_TICKS) {
+                handle.releaseUsingItem();
+                context.packetBroadcaster.broadcastEntityData();
+                drawing = false;
+            }
+            return true;
+        }
+
         if (!sight && drawTicks > 60) {
             handle.stopUsingItem();
             context.packetBroadcaster.broadcastEntityData();
@@ -189,52 +221,39 @@ public class ArcherController {
             return true;
         }
         // Fully drawn but not lined up yet: hold the draw until we are.
-        if (drawTicks < (crossbow ? CROSSBOW_DRAW_TICKS : BOW_DRAW_TICKS) || !sight || !onTarget) return true;
+        if (drawTicks < BOW_DRAW_TICKS || !sight || !onTarget) return true;
 
-        handle.stopUsingItem();
+        float[] shot = withAimError(aim);
+        VanillaUse.face(context, handle, shot[0], shot[1]);
+        handle.releaseUsingItem();
         context.packetBroadcaster.broadcastEntityData();
+        context.packetBroadcaster.broadcastEquipment();
         drawing = false;
-        fire(botPlayer, handle, aim, slot, crossbow);
-        shotCooldown = crossbow ? 10 : 6;
+        shotCooldown = 6;
         return true;
     }
 
-    private void fire(Player botPlayer, ServerPlayer handle, double[] aim, int bowSlot, boolean crossbow) {
-        double yaw = Math.toRadians(aim[0]);
-        double pitch = Math.toRadians(aim[1]);
-        // Minecraft: yaw 0 = +Z, pitch positive = down.
-        Vector dir = new Vector(-Math.sin(yaw) * Math.cos(pitch), -Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    private static boolean crossbowLoaded(ServerPlayer handle) {
+        try {
+            return net.minecraft.world.item.CrossbowItem.isCharged(handle.getMainHandItem());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
 
-        double spread = switch (context.settings.getDifficulty()) {
-            case EASY -> 0.045;
-            case NORMAL -> 0.025;
-            case HARD -> 0.012;
-            default -> 0.006;
+    // The bot's own hand shake on top of the bow's vanilla spread: a small
+    // aim error that shrinks with difficulty.
+    private float[] withAimError(double[] aim) {
+        double spreadDeg = switch (context.settings.getDifficulty()) {
+            case EASY -> 2.6;
+            case NORMAL -> 1.45;
+            case HARD -> 0.7;
+            default -> 0.35;
         };
         ThreadLocalRandom r = ThreadLocalRandom.current();
-        dir.add(new Vector(r.nextGaussian() * spread, r.nextGaussian() * spread, r.nextGaussian() * spread));
-        Vector vel = dir.normalize().multiply(crossbow ? 3.15 : ARROW_SPEED);
-
-        Arrow arrow = botPlayer.launchProjectile(Arrow.class, vel);
-        arrow.setCritical(true);
-        ItemStack bow = botPlayer.getInventory().getItem(bowSlot);
-        int power = bow == null ? 0 : bow.getEnchantmentLevel(Enchantment.POWER);
-        if (power > 0) arrow.setDamage(arrow.getDamage() + 0.5 * power + 0.5);
-        if (bow != null && bow.getEnchantmentLevel(Enchantment.FLAME) > 0) arrow.setFireTicks(100);
-
-        boolean infinity = bow != null && bow.getType() == Material.BOW
-                && bow.getEnchantmentLevel(Enchantment.INFINITY) > 0;
-        if (infinity) {
-            arrow.setPickupStatus(AbstractArrow.PickupStatus.CREATIVE_ONLY);
-        } else {
-            consumeArrow(botPlayer);
-            arrow.setPickupStatus(AbstractArrow.PickupStatus.ALLOWED);
-        }
-        wearBow(botPlayer, bowSlot);
-        botPlayer.getWorld().playSound(botPlayer.getLocation(),
-                crossbow ? Sound.ITEM_CROSSBOW_SHOOT : Sound.ENTITY_ARROW_SHOOT, 1.0f,
-                1.0f / (r.nextFloat() * 0.4f + 1.2f) + 0.5f);
-        handle.swing(InteractionHand.MAIN_HAND, true);
+        return new float[]{
+                (float) (aim[0] + r.nextGaussian() * spreadDeg),
+                (float) (aim[1] + r.nextGaussian() * spreadDeg)};
     }
 
     // Returns {yaw, pitch} in degrees that put a full-power arrow on the
@@ -332,35 +351,6 @@ public class ArcherController {
         int slot = context.inventoryController.ensureInHotbar(p, it -> it.getType() == Material.BOW);
         if (slot < 0) slot = context.inventoryController.ensureInHotbar(p, it -> it.getType() == Material.CROSSBOW);
         return slot >= 0 && slot <= 8 ? slot : -1;
-    }
-
-    private void consumeArrow(Player p) {
-        PlayerInventory inv = p.getInventory();
-        for (Material m : new Material[]{Material.ARROW, Material.SPECTRAL_ARROW, Material.TIPPED_ARROW}) {
-            int i = inv.first(m);
-            if (i < 0) continue;
-            ItemStack s = inv.getItem(i);
-            if (s.getAmount() <= 1) inv.setItem(i, null);
-            else s.setAmount(s.getAmount() - 1);
-            return;
-        }
-    }
-
-    private void wearBow(Player p, int slot) {
-        ItemStack bow = p.getInventory().getItem(slot);
-        if (bow == null || !(bow.getItemMeta() instanceof Damageable dmg)) return;
-        if (bow.getEnchantmentLevel(Enchantment.UNBREAKING) > 0
-                && ThreadLocalRandom.current().nextInt(bow.getEnchantmentLevel(Enchantment.UNBREAKING) + 1) > 0) {
-            return;
-        }
-        int next = dmg.getDamage() + 1;
-        if (next >= bow.getType().getMaxDurability()) {
-            p.getInventory().setItem(slot, null);
-        } else {
-            dmg.setDamage(next);
-            bow.setItemMeta(dmg);
-        }
-        context.packetBroadcaster.broadcastEquipment();
     }
 
     private void walkTowards(Player botPlayer, Location dest) {

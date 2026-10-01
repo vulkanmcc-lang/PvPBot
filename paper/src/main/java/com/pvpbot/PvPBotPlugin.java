@@ -97,6 +97,7 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
         botManager.loadFactionsFromConfig();
 
         Bukkit.getPluginManager().registerEvents(this, this);
+        Bukkit.getPluginManager().registerEvents(com.pvpbot.ai.VanillaUse.listener(), this);
 
         Bukkit.getPluginManager().registerEvents(
                 new com.pvpbot.commands.SettingsGui(), this);
@@ -426,6 +427,11 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
         PvPBot bot = botManager.getBots().get(victim.getUniqueId());
         if (bot == null || !bot.isAlive() || bot.getPacketSink() == null) return;
 
+        // A hit the shield took completely doesn't knock the blocker back in
+        // vanilla - only the attacker gets pushed. (This fallback used to
+        // shove bots on every blocked hit.)
+        if (event.getFinalDamage() <= 0.0 && blockedByShield(event)) return;
+
         Entity damager = event.getDamager();
         Player attacker = null;
         if (damager instanceof Player p) attacker = p;
@@ -455,6 +461,16 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
         }
 
         bot.getPacketSink().offerFallback(strength, dirX, dirZ);
+    }
+
+    @SuppressWarnings("deprecation")
+    private static boolean blockedByShield(EntityDamageByEntityEvent event) {
+        try {
+            return event.isApplicable(org.bukkit.event.entity.EntityDamageEvent.DamageModifier.BLOCKING)
+                    && event.getDamage(org.bukkit.event.entity.EntityDamageEvent.DamageModifier.BLOCKING) < 0.0;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     @EventHandler(ignoreCancelled = true)

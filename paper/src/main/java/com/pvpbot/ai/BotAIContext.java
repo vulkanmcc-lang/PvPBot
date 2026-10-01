@@ -234,6 +234,9 @@ public class BotAIContext {
 
     public int shieldPredictTicks = 0;
     public int shieldHoldTicks = 0;
+    // Ticks left before a wanted shield actually goes up (human reaction
+    // time); -1 = not waiting on one.
+    public int shieldReactDelay = -1;
     public int shieldFlickerTicks = 0;
     int enemyPredictCooldown = 0;
     double lastEnemyDist = Double.MAX_VALUE;
@@ -690,6 +693,7 @@ public class BotAIContext {
         knockbackReactionTicks = 0;
         shieldPredictTicks = 0;
         shieldHoldTicks = 0;
+        shieldReactDelay = -1;
         shieldFlickerTicks = 0;
     }
 
