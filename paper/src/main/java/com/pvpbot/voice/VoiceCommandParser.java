@@ -47,7 +47,8 @@ public final class VoiceCommandParser {
         ARMOR_BEST, // swap into the strongest armor they carry
         ARMOR_WORST,// swap into the weakest
         MINE_TO,    // dig straight down (then across) to a player below
-        SCATTER     // everyone runs off in a different direction
+        SCATTER,    // everyone runs off in a different direction
+        ISLAND_BRIDGE // the End: bridge from this island to the nearest other one
     }
 
     // SELF: the speaker ("mine down to me").
@@ -149,6 +150,14 @@ public final class VoiceCommandParser {
                     "abort", "peace"),
             rule(Intent.ENGAGE,
                     "weapons free", "fight back", "free fire", "you can fight", "engage", "go wild"),
+            rule(Intent.ISLAND_BRIDGE,
+                    "bridge to the next island", "bridge to the nearest island", "bridge to the closest island",
+                    "bridge to another island", "bridge to the other island", "bridge to that island",
+                    "bridge over to the next island", "bridge over to the island", "bridge to a new island",
+                    "bridge to an island", "bridge to the island", "make a bridge to the next island",
+                    "build a bridge to the next island", "make a bridge to the island",
+                    "build a bridge to the island", "go to the next island", "get to the next island",
+                    "bridge to next island", "next island"),
             rule(Intent.MINE_TO,
                     "mine down to {p}", "mine your way down to {p}", "mine your way to {p}", "mine to {p}",
                     "dig down to {p}", "dig your way down to {p}", "dig your way to {p}", "dig to {p}",
@@ -768,7 +777,8 @@ public final class VoiceCommandParser {
             Map.entry("pat", "path"), Map.entry("pass", "path"), Map.entry("bridging", "bridge"),
             Map.entry("worse", "worst"), Map.entry("bat", "bad"), Map.entry("vest", "best"),
             Map.entry("staying", "stay"), Map.entry("stays", "stay"), Map.entry("scattered", "scatter"),
-            Map.entry("scatters", "scatter"));
+            Map.entry("scatters", "scatter"), Map.entry("islands", "island"), Map.entry("highland", "island"),
+            Map.entry("eyeland", "island"));
 
     static boolean wordMatches(String heard, String want) {
         if (heard.equals(want)) return true;

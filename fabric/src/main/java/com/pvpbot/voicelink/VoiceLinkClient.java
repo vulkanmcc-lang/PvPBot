@@ -43,7 +43,7 @@ public final class VoiceLinkClient implements ClientModInitializer {
             "armor", "armour", "gear", "suit", "strip", "every", "make", "build", "bridge", "path",
             "pave", "tunnel", "look", "face", "turn", "eyes", "tower", "best", "worst", "bad",
             "good", "strongest", "weakest", "guard", "camp", "scatter", "split", "spread", "run",
-            "disperse", "fan");
+            "disperse", "fan", "next", "island");
 
     private static final Set<String> LEAD_IN = words(
             "ok", "okay", "hey", "yo", "alright", "right", "so", "and", "uh", "um", "now", "oi");

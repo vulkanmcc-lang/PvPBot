@@ -2217,7 +2217,8 @@ public class MovementController {
             double d = dx * dx + dz * dz;
             if (d < bestDistSq) { bestDistSq = d; best = p; }
         }
-        return best == null ? null : best.getLocation();
+        // Eyes, not feet: glancing at someone's feet reads as staring at the floor.
+        return best == null ? null : best.getEyeLocation();
     }
 
     // =====================================================================

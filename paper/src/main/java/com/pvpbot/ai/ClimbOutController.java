@@ -106,6 +106,15 @@ public class ClimbOutController {
             bestDist = Double.MAX_VALUE;
             return false;
         }
+        // Standing still on purpose (holding a spot, waiting by the leader,
+        // looking at someone) is not being stuck: only count ticks where
+        // the bot is actually trying to get somewhere.
+        boolean trying = Math.abs(context.smoothedForwardInput) > 0.1f || Math.abs(context.smoothedStrafeInput) > 0.1f
+                || (!context.currentPath.isEmpty() && context.pathNodeIndex < context.currentPath.size());
+        if (!trying) {
+            noProgress = Math.max(0, noProgress - 2);
+            return false;
+        }
         double dist = me.distance(d);
         if (dist < bestDist - 0.75) {
             bestDist = dist;
@@ -152,10 +161,13 @@ public class ClimbOutController {
         if (forced != null && forced.isOnline() && !forced.isDead() && forced.getWorld() == w) {
             return forced.getLocation();
         }
-        if (context.guardAnchor != null && context.guardAnchor.getWorld() == w
-                && context.guardAnchor.distanceSquared(botPlayer.getLocation()) > 9.0) {
-            return context.guardAnchor;
+        if (context.guardAnchor != null) {
+            // Holding a spot: the only place it wants to be is that spot.
+            return context.guardAnchor.getWorld() == w
+                    && context.guardAnchor.distanceSquared(botPlayer.getLocation()) > 9.0
+                    ? context.guardAnchor : null;
         }
+        if (context.followHolding) return null; // already next to the leader
         BotManager mgr = PvPBotPlugin.getInstance().getBotManager();
         UUID leaderId = mgr == null ? null : mgr.getLeaderFor(context.bot.getUUID());
         if (leaderId != null && !leaderId.equals(context.bot.getUUID())) {

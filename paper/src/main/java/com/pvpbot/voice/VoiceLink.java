@@ -258,7 +258,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         }
         boolean movement = switch (order.intent()) {
             case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, BREAK_FORMATION,
-                 MINE_TO, SCATTER -> true;
+                 MINE_TO, SCATTER, ISLAND_BRIDGE -> true;
             default -> false;
         };
         if (movement && order.intent() != Intent.FORMATION && order.subjectBot() == null && !order.commander()) {
@@ -487,7 +487,9 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         double dx = eye.getX() - be.getX(), dy = eye.getY() - be.getY(), dz = eye.getZ() - be.getZ();
                         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
                         float pitch = (float) Math.toDegrees(-Math.atan2(dy, Math.hypot(dx, dz)));
-                        ctx.requestLook(yaw, pitch, com.pvpbot.ai.BotAIContext.LOOK_UTILITY + 10, false);
+                        // Above idle glances and walking looks (they'd pull the
+                        // head away every second); fights skip this anyway.
+                        ctx.requestLook(yaw, pitch, com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
                     }
                 }, 0L, 1L);
                 ok(speaker, transcript, who + " → looking at you (" + bots.size() + ")");
@@ -636,6 +638,57 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 ok(speaker, transcript, who + " → digging to " + vName + " (" + diggers.size()
                         + " bot" + (diggers.size() == 1 ? "" : "s")
                         + (deepest > 0 ? ", " + deepest + " down" : "") + " - they follow if " + vName + " moves)");
+            }
+            case ISLAND_BRIDGE -> {
+                if (speaker.getWorld().getEnvironment() != World.Environment.THE_END) {
+                    fail(speaker, transcript, "island bridging only works in the End");
+                    return;
+                }
+                // Bridge with what they carry most of: netherrack or
+                // cobblestone (they're handed whatever the bridge needs).
+                int netherrack = 0, cobble = 0;
+                for (PvPBot b : bots) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp == null) continue;
+                    for (org.bukkit.inventory.ItemStack it : bp.getInventory().getStorageContents()) {
+                        if (it == null) continue;
+                        if (it.getType() == org.bukkit.Material.NETHERRACK) netherrack += it.getAmount();
+                        else if (it.getType() == org.bukkit.Material.COBBLESTONE) cobble += it.getAmount();
+                    }
+                }
+                org.bukkit.Material mat = netherrack > cobble
+                        ? org.bukkit.Material.NETHERRACK : org.bukkit.Material.COBBLESTONE;
+                com.pvpbot.schem.IslandBridge.Plan plan =
+                        com.pvpbot.schem.IslandBridge.plan(speaker.getLocation(), mat);
+                if (plan == null) {
+                    fail(speaker, transcript, "no other island within "
+                            + com.pvpbot.schem.IslandBridge.SEARCH_RADIUS + " blocks");
+                    return;
+                }
+                if (plan.blocks().isEmpty()) {
+                    fail(speaker, transcript, "that island is already connected");
+                    return;
+                }
+                stopVoiceBuild(speaker.getUniqueId(), manager);
+                String key = VOICE_BUILD_PREFIX + speaker.getUniqueId();
+                Location from = plan.from();
+                com.pvpbot.schem.BuildJob job = com.pvpbot.schem.BuildJob.fromPlacements(
+                        "island bridge", speaker.getWorld(), plan.blocks(),
+                        from.getBlockX(), from.getBlockY() - 1, from.getBlockZ(), who);
+                List<Player> crewPlayers = new ArrayList<>();
+                for (PvPBot b : bots) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp != null) crewPlayers.add(bp);
+                }
+                job.distribute(crewPlayers, job.bill());
+                plugin.getBuildJobs().put(key, job);
+                for (PvPBot b : bots) {
+                    b.setForcedTarget(null);
+                    b.getAI().getContext().buildController.assign(job);
+                }
+                ok(speaker, transcript, who + " → bridging to the next island, " + plan.length()
+                        + " blocks out (" + job.total() + " " + mat.name().toLowerCase() + ", "
+                        + bots.size() + " builders)");
             }
             case SCATTER -> {
                 int n = scatter(speaker, bots);
