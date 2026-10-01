@@ -2688,7 +2688,7 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
 
     private void handleKitCommand(Player player, String[] args, BotManager manager, KitManager kitManager) {
         if (args.length < 3) {
-            player.sendMessage("§cUsage: /pvpbot kit <create|remove|give> <kitname> [botname]");
+            player.sendMessage("§cUsage: /pvpbot kit <create|remove|give> <kitname> [bot|player]");
             return;
         }
 
@@ -2710,22 +2710,53 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             }
         }
         else if (action.equals("give")) {
-            if (args.length < 4) {
-                player.sendMessage("§cUsage: /pvpbot kit give <kitname> <botname>");
-                return;
-            }
             if (!kitManager.kitExists(kitName)) {
                 player.sendMessage("§cKit '" + kitName + "' does not exist.");
                 return;
             }
-            PvPBot bot = manager.getBotByName(args[3]);
-            if (bot == null) {
-                player.sendMessage("§cBot not found!");
+            // No name: yourself. A bot's name: that bot. Otherwise any online
+            // player - the kit replaces their inventory, same as for a bot.
+            if (args.length >= 4) {
+                PvPBot bot = manager.getBotByName(args[3]);
+                if (bot != null) {
+                    bot.equipKit(kitName);
+                    player.sendMessage("§aApplied kit '§e" + kitName + "§a' to " + bot.getName());
+                    return;
+                }
+            }
+            Player target = args.length >= 4 ? Bukkit.getPlayerExact(args[3]) : player;
+            if (target == null && args.length >= 4) target = Bukkit.getPlayer(args[3]);
+            if (target == null || !target.isOnline()) {
+                player.sendMessage("§cNo bot or online player called §f" + args[3] + "§c.");
                 return;
             }
-            bot.equipKit(kitName);
-            player.sendMessage("§aApplied kit '§e" + kitName + "§a' to " + bot.getName());
+            giveKitToPlayer(target, kitName, kitManager);
+            if (target == player) {
+                player.sendMessage("§aYou got kit '§e" + kitName + "§a'.");
+            } else {
+                player.sendMessage("§aGave kit '§e" + kitName + "§a' to §f" + target.getName() + "§a.");
+                target.sendMessage("§aYou were given kit '§e" + kitName + "§a'.");
+            }
         }
+    }
+
+    // A real player gets the kit exactly as a bot would: inventory, armor and
+    // off-hand replaced with the kit's.
+    private void giveKitToPlayer(Player p, String kitName, KitManager kitManager) {
+        ItemStack[] contents = kitManager.getKitContents(kitName);
+        ItemStack[] armor = kitManager.getKitArmor(kitName);
+        ItemStack offhand = kitManager.getKitOffhand(kitName);
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        inv.clear();
+        if (contents != null) inv.setStorageContents(java.util.Arrays.copyOf(contents, inv.getStorageContents().length));
+        if (armor != null) {
+            if (armor.length > 0) inv.setBoots(armor[0]);
+            if (armor.length > 1) inv.setLeggings(armor[1]);
+            if (armor.length > 2) inv.setChestplate(armor[2]);
+            if (armor.length > 3) inv.setHelmet(armor[3]);
+        }
+        inv.setItemInOffHand(offhand);
+        p.updateInventory();
     }
 
     private void applyKit(Player p, String kitName) {
@@ -3639,6 +3670,10 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
             else if (baseCmd.equals("kit") && secondArg.equals("give")) {
                 for (PvPBot bot : mgr.getBots().values()) {
                     completions.add(org.bukkit.ChatColor.stripColor(bot.getName()));
+                }
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    String n = online.getName();
+                    if (!completions.contains(n)) completions.add(n);
                 }
             }
 
