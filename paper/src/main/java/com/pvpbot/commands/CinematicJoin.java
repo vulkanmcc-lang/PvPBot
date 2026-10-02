@@ -203,26 +203,66 @@ public final class CinematicJoin {
         new WatchLeader(manager, faction, player.getUniqueId(), spawned).runTaskTimer(plugin, 1L, 1L);
         player.sendMessage("§d§lCinematic §r§7- §e" + spawned.size() + "§7 frozen bot(s) on your spots with kit §e"
                 + kit.toLowerCase() + "§7" + (faction != null ? " in faction §e" + faction.toLowerCase() : "")
-                + "§7, watching " + (faction != null ? "the faction leader" : "you") + ".");
+                + "§7 - they look around confused for a bit, then watch "
+                + (faction != null ? "the faction leader" : "you") + ".");
         player.sendMessage("§8Unfreeze them when the scene's done: /pvpbot set "
                 + (faction != null ? faction.toLowerCase() : "<bot>") + " frozen false");
         return true;
     }
 
-    // Frozen bots keep their eyes on their faction's leader (or whoever ran
-    // the command, if the faction has no leader online). A bot drops out once
-    // it's unfrozen or gone.
+    // How long a freshly spawned bot looks around, lost, before it settles
+    // its eyes on the leader.
+    private static final int CONFUSED_MIN_TICKS = 100;
+    private static final int CONFUSED_MAX_TICKS = 200;
+
+    // Frozen bots first glance around like they just woke up somewhere they
+    // don't recognise - quick head turns, looking up and down, the odd
+    // double-take - then keep their eyes on their faction's leader (or
+    // whoever ran the command, if the faction has no leader online). A bot
+    // drops out once it's unfrozen or gone.
     private static final class WatchLeader extends BukkitRunnable {
         private final BotManager manager;
         private final String faction;
         private final UUID fallback;
         private final List<PvPBot> bots;
+        private final java.util.Map<PvPBot, Integer> confusedLeft = new java.util.HashMap<>();
+        private final java.util.Map<PvPBot, Integer> nextTurn = new java.util.HashMap<>();
+        private final java.util.Map<PvPBot, float[]> glance = new java.util.HashMap<>();
 
         WatchLeader(BotManager manager, String faction, UUID fallback, List<PvPBot> bots) {
             this.manager = manager;
             this.faction = faction;
             this.fallback = fallback;
             this.bots = new ArrayList<>(bots);
+            ThreadLocalRandom r = ThreadLocalRandom.current();
+            for (PvPBot b : bots) {
+                confusedLeft.put(b, r.nextInt(CONFUSED_MIN_TICKS, CONFUSED_MAX_TICKS + 1));
+                nextTurn.put(b, r.nextInt(2, 10));
+            }
+        }
+
+        // One tick of looking around lost; false once that's over.
+        private boolean lookAroundConfused(PvPBot b, Player bp) {
+            int left = confusedLeft.merge(b, -1, Integer::sum);
+            if (left <= 0) return false;
+            ThreadLocalRandom r = ThreadLocalRandom.current();
+            int turn = nextTurn.merge(b, -1, Integer::sum);
+            float[] aim = glance.get(b);
+            if (aim == null || turn <= 0) {
+                float newYaw;
+                if (aim != null && r.nextDouble() < 0.25) {
+                    // Double-take: whip back the way it just looked.
+                    newYaw = aim[0] + (r.nextBoolean() ? 160f : -160f) + (float) r.nextGaussian() * 15f;
+                } else {
+                    newYaw = bp.getLocation().getYaw() + (float) ((r.nextDouble() - 0.5) * 300.0);
+                }
+                float newPitch = (float) Math.max(-50.0, Math.min(55.0, r.nextGaussian() * 25.0));
+                aim = new float[]{newYaw, newPitch};
+                glance.put(b, aim);
+                nextTurn.put(b, r.nextInt(12, 36));
+            }
+            b.getAI().getContext().requestLook(aim[0], aim[1], com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
+            return true;
         }
 
         @Override
@@ -242,6 +282,7 @@ public final class CinematicJoin {
                     it.remove();
                     continue;
                 }
+                if (lookAroundConfused(b, bp)) continue;
                 if (watch == null || watch.getWorld() != bp.getWorld()
                         || watch.getUniqueId().equals(bp.getUniqueId())) continue;
                 Location eye = watch.getEyeLocation();
@@ -258,7 +299,7 @@ public final class CinematicJoin {
     private static void sendUsage(Player player) {
         player.sendMessage("§6§lCinematic:");
         player.sendMessage("§e /pvpbot cinematic markcoordinates §7- mark where you stand (as many as you like)");
-        player.sendMessage("§e /pvpbot cinematic spawn <kit> §7- a frozen, black-skinned, random-named bot with that kit on every mark, in your faction, watching its leader");
+        player.sendMessage("§e /pvpbot cinematic spawn <kit> §7- a frozen, black-skinned, random-named bot with that kit on every mark, in your faction - looks around confused, then watches its leader");
         player.sendMessage("§e /pvpbot cinematic marks §7/ §eunmark §7/ §eclearmarks §7- list / drop the last / drop all marks");
         player.sendMessage("§e /pvpbot cinematic spawn <bots> §7- simulates players joining at world spawn");
         player.sendMessage("§e /pvpbot cinematic circle <amount> <faction> <kit> §7- rings of invisible bots around you, armor in their pack");
