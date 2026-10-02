@@ -92,7 +92,7 @@ public final class Nbt {
     }
 
     private static int checkLength(int len) throws IOException {
-        if (len < 0 || len > 64 * 1024 * 1024) {
+        if (len < 0 || len > Integer.MAX_VALUE - 8) {
             throw new IOException("implausible NBT array length: " + len);
         }
         return len;

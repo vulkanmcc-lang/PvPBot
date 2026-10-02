@@ -766,10 +766,6 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     fail(speaker, transcript, "can't load the schematic for \"" + order.target() + "\"");
                     return;
                 }
-                if (com.pvpbot.schem.SchematicPreview.tooBig(schem)) {
-                    fail(speaker, transcript, order.target() + " is too big to build");
-                    return;
-                }
                 stopVoiceBuild(speaker.getUniqueId(), manager);
                 BuildRun old = buildRuns.remove(speaker.getUniqueId());
                 if (old != null) old.end(false);

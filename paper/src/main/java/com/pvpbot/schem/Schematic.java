@@ -78,9 +78,11 @@ public class Schematic {
             throw new IOException("bad dimensions " + width + "x" + height + "x" + length);
         }
 
+        // No size cap - only what a Java array can physically hold (one int
+        // per cell). A big one just takes RAM while it's loaded/built.
         long volume = (long) width * height * length;
-        if (volume > 4_000_000L) {
-            throw new IOException("schematic is " + volume + " blocks; the cap is 4,000,000");
+        if (volume > Integer.MAX_VALUE - 8) {
+            throw new IOException("schematic is " + volume + " blocks - more than one array can hold");
         }
 
         Map<String, Object> paletteTag = Nbt.getCompound(root, "Palette");
