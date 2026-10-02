@@ -161,11 +161,6 @@ public final class CinematicJoin {
         plugin.saveConfig();
     }
 
-    // How long a freshly spawned bot stands there looking around, lost,
-    // before it starts acting like itself (on its spot).
-    private static final int CONFUSED_MIN_TICKS = 100;
-    private static final int CONFUSED_MAX_TICKS = 200;
-
     private static boolean spawnOnMarks(Player player, String kit, PvPBotPlugin plugin, BotManager manager) {
         KitManager kitManager = plugin.getKitManager();
         if (!kitManager.kitExists(kit)) {
@@ -182,20 +177,21 @@ public final class CinematicJoin {
             marks = marks.subList(0, MAX_BOTS);
         }
 
+        // They join whatever faction the player running this is in.
+        String faction = manager.getPlayerFaction(player.getUniqueId());
+
         List<PvPBot> spawned = new ArrayList<>();
         List<Location> spots = marks;
         // Random-style names, black skins.
         PvPBot.spawningWithBlackSkin(() -> {
             for (Location spot : spots) {
-                PvPBot bot = manager.spawnBot(spot.clone(), null, NameGenerator.NameStyle.ALT);
+                PvPBot bot = manager.spawnBot(spot.clone(), faction, NameGenerator.NameStyle.ALT);
                 if (bot == null) continue;
                 bot.equipKit(kit);
-                var ctx = bot.getAI().getContext();
-                // Rooted to the spot (fights only right around it), weapons
-                // down while it gets its bearings.
-                bot.setGuardPost(spot.clone(), 2.0, spot.getYaw());
-                ctx.voiceHold = true;
-                ctx.holdFire = true;
+                // Frozen: no moving, no fighting, nothing - just standing there.
+                BotSettings bs = manager.getBotSettings(bot.getUUID());
+                bs.setFrozen(true);
+                bs.setHostile(false);
                 spawned.add(bot);
             }
         });
@@ -204,69 +200,56 @@ public final class CinematicJoin {
             return true;
         }
 
-        new Confused(spawned).runTaskTimer(plugin, 1L, 1L);
-        player.sendMessage("§d§lCinematic §r§7- §e" + spawned.size() + "§7 bot(s) on your spots with kit §e"
-                + kit.toLowerCase() + "§7. They stay put, look around confused for a bit, then hold their spots.");
+        new WatchLeader(manager, faction, player.getUniqueId(), spawned).runTaskTimer(plugin, 1L, 1L);
+        player.sendMessage("§d§lCinematic §r§7- §e" + spawned.size() + "§7 frozen bot(s) on your spots with kit §e"
+                + kit.toLowerCase() + "§7" + (faction != null ? " in faction §e" + faction.toLowerCase() : "")
+                + "§7, watching " + (faction != null ? "the faction leader" : "you") + ".");
+        player.sendMessage("§8Unfreeze them when the scene's done: /pvpbot set "
+                + (faction != null ? faction.toLowerCase() : "<bot>") + " frozen false");
         return true;
     }
 
-    // Each bot, rooted to its spot, glances around like it just woke up
-    // somewhere it doesn't recognise: quick head turns to random directions,
-    // looking up and down, the odd double-take - then it calms down,
-    // weapons back up, still holding its spot.
-    private static final class Confused extends BukkitRunnable {
+    // Frozen bots keep their eyes on their faction's leader (or whoever ran
+    // the command, if the faction has no leader online). A bot drops out once
+    // it's unfrozen or gone.
+    private static final class WatchLeader extends BukkitRunnable {
+        private final BotManager manager;
+        private final String faction;
+        private final UUID fallback;
         private final List<PvPBot> bots;
-        private final java.util.Map<PvPBot, float[]> look = new java.util.HashMap<>();
-        private final java.util.Map<PvPBot, Integer> left = new java.util.HashMap<>();
-        private final java.util.Map<PvPBot, Integer> nextTurn = new java.util.HashMap<>();
 
-        Confused(List<PvPBot> bots) {
+        WatchLeader(BotManager manager, String faction, UUID fallback, List<PvPBot> bots) {
+            this.manager = manager;
+            this.faction = faction;
+            this.fallback = fallback;
             this.bots = new ArrayList<>(bots);
-            ThreadLocalRandom r = ThreadLocalRandom.current();
-            for (PvPBot b : bots) {
-                left.put(b, r.nextInt(CONFUSED_MIN_TICKS, CONFUSED_MAX_TICKS + 1));
-                nextTurn.put(b, r.nextInt(2, 10));
-            }
         }
 
         @Override
         public void run() {
-            ThreadLocalRandom r = ThreadLocalRandom.current();
+            Player watch = null;
+            if (faction != null) {
+                UUID leader = manager.getFactionLeader(faction);
+                if (leader != null) watch = Bukkit.getPlayer(leader);
+            }
+            if (watch == null || !watch.isOnline()) watch = Bukkit.getPlayer(fallback);
+
             for (java.util.Iterator<PvPBot> it = bots.iterator(); it.hasNext(); ) {
                 PvPBot b = it.next();
                 Player bp = b.getBukkitPlayer();
-                if (!b.isAlive() || bp == null) {
+                BotSettings bs = manager.getBotSettings(b.getUUID());
+                if (!b.isAlive() || bp == null || bs == null || !bs.isFrozen()) {
                     it.remove();
                     continue;
                 }
-                var ctx = b.getAI().getContext();
-                int t = left.merge(b, -1, Integer::sum);
-                if (t <= 0 || !ctx.holdFire) {
-                    // Done (or someone gave it an order meanwhile).
-                    ctx.holdFire = false;
-                    it.remove();
-                    continue;
-                }
-                ctx.forwardInput = 0f;
-                ctx.strafeInput = 0f;
-
-                int turn = nextTurn.merge(b, -1, Integer::sum);
-                float[] aim = look.get(b);
-                if (aim == null || turn <= 0) {
-                    float yaw = bp.getLocation().getYaw();
-                    float newYaw;
-                    if (r.nextDouble() < 0.25 && aim != null) {
-                        // Double-take: snap back the way it just looked.
-                        newYaw = aim[0] + (r.nextBoolean() ? 160f : -160f) + (float) r.nextGaussian() * 15f;
-                    } else {
-                        newYaw = yaw + (float) ((r.nextDouble() - 0.5) * 300.0);
-                    }
-                    float newPitch = (float) Math.max(-50.0, Math.min(55.0, r.nextGaussian() * 25.0));
-                    aim = new float[]{newYaw, newPitch};
-                    look.put(b, aim);
-                    nextTurn.put(b, r.nextInt(12, 36));
-                }
-                ctx.requestLook(aim[0], aim[1], com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
+                if (watch == null || watch.getWorld() != bp.getWorld()
+                        || watch.getUniqueId().equals(bp.getUniqueId())) continue;
+                Location eye = watch.getEyeLocation();
+                Location be = bp.getEyeLocation();
+                double dx = eye.getX() - be.getX(), dy = eye.getY() - be.getY(), dz = eye.getZ() - be.getZ();
+                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                float pitch = (float) Math.toDegrees(-Math.atan2(dy, Math.hypot(dx, dz)));
+                b.getAI().getContext().requestLook(yaw, pitch, com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
             }
             if (bots.isEmpty()) cancel();
         }
@@ -275,7 +258,7 @@ public final class CinematicJoin {
     private static void sendUsage(Player player) {
         player.sendMessage("§6§lCinematic:");
         player.sendMessage("§e /pvpbot cinematic markcoordinates §7- mark where you stand (as many as you like)");
-        player.sendMessage("§e /pvpbot cinematic spawn <kit> §7- a black-skinned, random-named bot with that kit on every mark");
+        player.sendMessage("§e /pvpbot cinematic spawn <kit> §7- a frozen, black-skinned, random-named bot with that kit on every mark, in your faction, watching its leader");
         player.sendMessage("§e /pvpbot cinematic marks §7/ §eunmark §7/ §eclearmarks §7- list / drop the last / drop all marks");
         player.sendMessage("§e /pvpbot cinematic spawn <bots> §7- simulates players joining at world spawn");
         player.sendMessage("§e /pvpbot cinematic circle <amount> <faction> <kit> §7- rings of invisible bots around you, armor in their pack");
