@@ -71,6 +71,20 @@ public class BuildJob {
         if (m != null) scaffoldMaterial = m;
     }
 
+    // Generated builds (voice paths, take-cover roofs): any solid block
+    // counts, and every bot builds - and scaffolds - with its own build
+    // block (end stone for random-named bots, plain blocks for the rest)
+    // instead of the material in the plan.
+    private boolean anyBuildBlock = false;
+
+    public boolean anyBuildBlock() {
+        return anyBuildBlock;
+    }
+
+    public void setAnyBuildBlock(boolean any) {
+        anyBuildBlock = any;
+    }
+
     // A temporary block a bot placed to reach part of the build (a pillar
     // step or a bridge floor). Tracked here, not just in the bot, so the job
     // can guarantee none are left behind even if the bot that placed them
@@ -477,7 +491,7 @@ public class BuildJob {
             if (t == avoid) continue;
 
             if (t.y > currentLayer + 1) break;
-            if (!hasItem(botPlayer, t.item)) continue;
+            if (!anyBuildBlock && !hasItem(botPlayer, t.item)) continue;
 
             if (!isSupported(t)) continue;
 

@@ -674,7 +674,7 @@ public class ExcavationController {
         if (slot < 0 && !gaveSealBlocks && InventoryController.freeBuildBlocks()) {
             // Nothing to plug with: same deal as pillaring - hand out some
             // cobblestone once so the job doesn't just flood.
-            botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_SEAL_BLOCKS));
+            context.inventoryController.giveBuildBlocks(botPlayer, GIVE_SEAL_BLOCKS);
             gaveSealBlocks = true;
             slot = sealSlot(botPlayer);
         }
@@ -698,11 +698,10 @@ public class ExcavationController {
         return true;
     }
 
-    // Hotbar slot of the block to plug water with. Plugs are building too:
-    // end stone only.
+    // Hotbar slot of the block to plug water with - this bot's build block
+    // (end stone for random-named bots, plain blocks for the rest).
     private int sealSlot(Player botPlayer) {
-        return context.inventoryController.ensureInHotbar(botPlayer,
-                it -> it.getType() == InventoryController.BUILD_BLOCK);
+        return context.inventoryController.findBuildBlockSlot(botPlayer);
     }
 
     // In water inside the job (or right at its edge) with something diggable

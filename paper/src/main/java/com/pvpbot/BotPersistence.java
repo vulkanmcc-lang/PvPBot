@@ -73,6 +73,7 @@ public final class BotPersistence {
             ConfigurationSection sec = yml.createSection(path);
 
             sec.set("name", bot.getName());
+            sec.set("name-style", bot.getNameStyle().name());
             sec.set("world", loc.getWorld().getName());
             sec.set("x", loc.getX());
             sec.set("y", loc.getY());
@@ -182,8 +183,14 @@ public final class BotPersistence {
 
             PvPBot bot;
             try {
+                NameGenerator.NameStyle style;
+                try {
+                    style = NameGenerator.NameStyle.valueOf(sec.getString("name-style", "CLEAN"));
+                } catch (IllegalArgumentException bad) {
+                    style = NameGenerator.NameStyle.CLEAN;
+                }
                 bot = manager.restoreBot(loc, sec.getString("faction"),
-                        sec.getString("name"), uuid, settings);
+                        sec.getString("name"), uuid, settings, style);
             } catch (Throwable t) {
                 plugin.getLogger().warning("Failed to restore bot "
                         + sec.getString("name", key) + ": " + t);

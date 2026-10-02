@@ -1120,10 +1120,15 @@ public class BotManager {
 
     public PvPBot restoreBot(Location location, String faction,
                              String name, UUID uuid, BotSettings settings) {
+        return restoreBot(location, faction, name, uuid, settings, NameGenerator.NameStyle.CLEAN);
+    }
+
+    public PvPBot restoreBot(Location location, String faction, String name, UUID uuid,
+                             BotSettings settings, NameGenerator.NameStyle nameStyle) {
         BotSettings botSettings = settings != null ? settings : new BotSettings(globalSettings);
 
         PvPBot bot = new PvPBot(location, plugin, botSettings,
-                NameGenerator.NameStyle.CLEAN, name, uuid);
+                nameStyle == null ? NameGenerator.NameStyle.CLEAN : nameStyle, name, uuid);
 
         activeBots.put(bot.getUUID(), bot);
         botSettingsMap.put(bot.getUUID(), botSettings);

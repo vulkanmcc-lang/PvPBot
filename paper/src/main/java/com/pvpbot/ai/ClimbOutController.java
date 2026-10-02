@@ -304,8 +304,7 @@ public class ClimbOutController {
                 return false;
             }
             lastGiftTick = now;
-            botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIFT_BLOCKS));
-            context.packetBroadcaster.broadcastEquipment();
+            context.inventoryController.giveBuildBlocks(botPlayer, GIFT_BLOCKS);
         }
         context.movementController.pillarUpStep(botPlayer);
         return true;

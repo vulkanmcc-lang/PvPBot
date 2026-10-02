@@ -421,29 +421,21 @@ public class IslandBridgeController {
     // Blocks
     // ---------------------------------------------------------------------
 
-    private static int count(Player p) {
-        int n = 0;
-        for (ItemStack it : p.getInventory().getStorageContents()) {
-            if (it != null && it.getType() == BLOCK) n += it.getAmount();
-        }
-        return n;
+    // Each bot bridges with its own build block: end stone for random-named
+    // bots, plain blocks (cobblestone...) for the rest.
+    private int count(Player p) {
+        return context.inventoryController.countBuildBlocks(p);
     }
 
     private void giveBlocks(Player p, int amount) {
-        if (!InventoryController.freeBuildBlocks()) return;
-        while (amount > 0) {
-            int stack = Math.min(64, amount);
-            p.getInventory().addItem(new ItemStack(BLOCK, stack));
-            amount -= stack;
-        }
-        context.packetBroadcaster.broadcastEquipment();
+        context.inventoryController.giveBuildBlocks(p, amount);
     }
 
     private boolean place(Player botPlayer, ServerPlayer h, Block at) {
-        int slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == BLOCK);
+        int slot = context.inventoryController.findBuildBlockSlot(botPlayer);
         if (slot < 0 || slot > 8) {
             giveBlocks(botPlayer, 64);
-            slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == BLOCK);
+            slot = context.inventoryController.findBuildBlockSlot(botPlayer);
             if (slot < 0 || slot > 8) return true; // try again next time
         }
         Block against = at.getRelative(org.bukkit.block.BlockFace.DOWN);

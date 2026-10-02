@@ -423,12 +423,13 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         speaker.getLocation().getBlockX(), speaker.getLocation().getBlockY() - 1,
                         speaker.getLocation().getBlockZ(), who);
                 job.setScaffoldMaterial(com.pvpbot.ai.InventoryController.BUILD_BLOCK);
+                job.setAnyBuildBlock(true);
                 List<Player> crewPlayers = new ArrayList<>();
                 for (PvPBot b : bots) {
                     Player bp = b.getBukkitPlayer();
                     if (bp != null) crewPlayers.add(bp);
                 }
-                if (com.pvpbot.ai.InventoryController.freeBuildBlocks()) job.distribute(crewPlayers, job.bill());
+                supplyCrew(crewPlayers, job.total());
                 plugin.getBuildJobs().put(key, job);
                 for (PvPBot b : bots) {
                     b.setForcedTarget(null);
@@ -910,12 +911,13 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 job = com.pvpbot.schem.BuildJob.fromPlacements("shelter", center.getWorld(), plan.blocks(),
                         center.getBlockX(), center.getBlockY() - 1, center.getBlockZ(), who);
                 job.setScaffoldMaterial(com.pvpbot.ai.InventoryController.BUILD_BLOCK);
+                job.setAnyBuildBlock(true);
                 List<Player> crewPlayers = new ArrayList<>();
                 for (PvPBot b : builders) {
                     Player bp = b.getBukkitPlayer();
                     if (bp != null) crewPlayers.add(bp);
                 }
-                if (com.pvpbot.ai.InventoryController.freeBuildBlocks()) job.distribute(crewPlayers, job.bill());
+                supplyCrew(crewPlayers, job.total());
                 plugin.getBuildJobs().put(VOICE_BUILD_PREFIX + speaker, job);
                 for (PvPBot b : builders) {
                     b.setForcedTarget(null);
@@ -987,6 +989,22 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         void end() {
             if (task != null) task.cancel();
             coverRuns.remove(speaker, this);
+        }
+    }
+
+    // Hand every builder its share of a generated build in its own build
+    // block (end stone for random-named bots, cobblestone for the rest) -
+    // only while free-build-blocks is on.
+    private void supplyCrew(List<Player> crewPlayers, int total) {
+        if (crewPlayers.isEmpty() || !com.pvpbot.ai.InventoryController.freeBuildBlocks()) return;
+        int each = (int) Math.ceil(total / (double) crewPlayers.size()) + 16;
+        BotManager manager = plugin.getBotManager();
+        for (Player p : crewPlayers) {
+            PvPBot b = manager.getBots().get(p.getUniqueId());
+            if (b == null) continue;
+            var inv = b.getAI().getContext().inventoryController;
+            int have = inv.countBuildBlocks(p);
+            if (have < each) inv.giveBuildBlocks(p, each - have);
         }
     }
 

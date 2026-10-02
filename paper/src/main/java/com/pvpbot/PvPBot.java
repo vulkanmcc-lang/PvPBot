@@ -31,6 +31,9 @@ import java.util.UUID;
 public class PvPBot {
     private final ServerPlayer handle;
     private final String name;
+    // How its name was made (normal / random / void). Random-named bots are
+    // the ones that build with end stone.
+    private final NameGenerator.NameStyle nameStyle;
     private final UUID uuid;
     private boolean alive = true;
 
@@ -105,6 +108,14 @@ public class PvPBot {
 
     public BotAI getAI() { return ai; }
 
+    public NameGenerator.NameStyle getNameStyle() {
+        return nameStyle;
+    }
+
+    public boolean isRandomNamed() {
+        return nameStyle == NameGenerator.NameStyle.ALT;
+    }
+
     public void orderToFormationSlot(org.bukkit.Location slot) {
         orderToFormationSlot(slot, 600);
     }
@@ -137,6 +148,7 @@ public class PvPBot {
                   NameGenerator.NameStyle nameStyle, String fixedName, UUID fixedUuid) {
         this.settings = settings;
         this.silent   = quietSpawn;
+        this.nameStyle = nameStyle == null ? NameGenerator.NameStyle.CLEAN : nameStyle;
         this.name     = (fixedName != null && !fixedName.isBlank())
                 ? fixedName : NameGenerator.getRandomName(nameStyle);
         if (fixedName != null) NameGenerator.reserveName(this.name);

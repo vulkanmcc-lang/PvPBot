@@ -251,7 +251,7 @@ public class BuildController {
         }
 
         if (plan != null) {
-            if (isPlaced(target(task), task)) {
+            if (placedNow(target(task), task)) {
                 plan = null;
                 setSneak(false);
             } else {
@@ -268,7 +268,7 @@ public class BuildController {
         double dz = task.z + 0.5 - botLoc.getZ();
         double distSq = dx * dx + dy * dy + dz * dz;
 
-        if (isPlaced(target, task)) {
+        if (placedNow(target, task)) {
             job.complete(task);
             task = null;
             phase = Phase.IDLE;
@@ -359,6 +359,14 @@ public class BuildController {
     // reshape to connect to their neighbours, grass turns to dirt under a
     // block, leaves track their distance - and comparing full states made
     // bots mine their own finished blocks to "fix" them, forever.
+    // Built yet? For a generated build any solid block in the cell will do.
+    private boolean placedNow(Block b, BuildJob.Task t) {
+        if (job != null && job.anyBuildBlock()) {
+            return b.getType().isSolid() && !VanillaWorld.replaceable(b);
+        }
+        return isPlaced(b, t);
+    }
+
     private static boolean isPlaced(Block b, BuildJob.Task t) {
         if (!cellHolds(b, t.data)) return false;
         // A bed/door/tall plant is only built once both halves stand.
@@ -755,8 +763,9 @@ public class BuildController {
     private void placeBlock(Player botPlayer, ServerPlayer handle, Block target) {
         if (placeDelay > 0) return;
 
-        int slot = context.inventoryController.ensureInHotbar(
-                botPlayer, it -> it.getType() == task.item);
+        int slot = job.anyBuildBlock()
+                ? context.inventoryController.findBlockSlot(botPlayer)
+                : context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == task.item);
         if (slot < 0) {
             job.release(task);
             task = null;
@@ -781,7 +790,8 @@ public class BuildController {
         if (task.hasPartner() && task.data instanceof org.bukkit.block.data.Directional dir) {
             yaw = VanillaWorld.yawOf(dir.getFacing());
         }
-        if (!VanillaWorld.place(context, botPlayer, slot, target, support, task.data, yaw)) {
+        org.bukkit.block.data.BlockData want = job.anyBuildBlock() ? null : task.data;
+        if (!VanillaWorld.place(context, botPlayer, slot, target, support, want, yaw)) {
             // Refused (someone standing in it, protection, nothing to click
             // in reach): try another part, and give up on this one after a
             // few tries so a protected cell can't hold the build forever.
@@ -875,7 +885,8 @@ public class BuildController {
         int blocksNeeded = 0;
         for (ScaffoldPlanner.Step st : p) if (st.placesBlock()) blocksNeeded++;
         if (blocksNeeded > 0 && countScaffold(botPlayer) < blocksNeeded) {
-            job.supply(botPlayer, job.scaffoldMaterial(), Math.max(32, blocksNeeded));
+            if (job.anyBuildBlock()) context.inventoryController.giveBuildBlocks(botPlayer, Math.max(32, blocksNeeded));
+            else job.supply(botPlayer, job.scaffoldMaterial(), Math.max(32, blocksNeeded));
         }
 
         plan = p;
@@ -1023,6 +1034,7 @@ public class BuildController {
     }
 
     private int countScaffold(Player botPlayer) {
+        if (job.anyBuildBlock()) return context.inventoryController.countBuildBlocks(botPlayer);
         int n = 0;
         for (ItemStack it : botPlayer.getInventory().getStorageContents()) {
             if (it != null && it.getType() == job.scaffoldMaterial()) n += it.getAmount();
@@ -1037,13 +1049,18 @@ public class BuildController {
                                   int standX, int standY, int standZ) {
         if (job.isBuildCell(cell.getX(), cell.getY(), cell.getZ())) return false;
 
-        int slot = context.inventoryController.ensureInHotbar(
-                botPlayer, it -> it.getType() == job.scaffoldMaterial());
-        if (slot < 0 && (job.scaffoldMaterial() != InventoryController.BUILD_BLOCK
-                || InventoryController.freeBuildBlocks())) {
-            job.supply(botPlayer, job.scaffoldMaterial(), 32);
+        int slot;
+        if (job.anyBuildBlock()) {
+            // The bot's own build block (topped up if it's run dry).
+            slot = context.inventoryController.findBlockSlot(botPlayer);
+        } else {
             slot = context.inventoryController.ensureInHotbar(
                     botPlayer, it -> it.getType() == job.scaffoldMaterial());
+            if (slot < 0) {
+                job.supply(botPlayer, job.scaffoldMaterial(), 32);
+                slot = context.inventoryController.ensureInHotbar(
+                        botPlayer, it -> it.getType() == job.scaffoldMaterial());
+            }
         }
         if (slot < 0 || slot > 8) return false;
         ItemStack held = botPlayer.getInventory().getItem(slot);
@@ -1053,7 +1070,9 @@ public class BuildController {
                 : job.world.getBlockAt(standX, standY - 1, standZ);
         // A real right click on the face we're standing against.
         if (!VanillaWorld.place(context, botPlayer, slot, cell, against, null)) return false;
-        job.addScaffold(cell.getX(), cell.getY(), cell.getZ(), job.scaffoldMaterial(),
+        // Recorded as whatever actually went down, so teardown takes back
+        // exactly that block.
+        job.addScaffold(cell.getX(), cell.getY(), cell.getZ(), cell.getType(),
                 context.bot.getUUID(), pillar, standX, standY, standZ);
         return true;
     }

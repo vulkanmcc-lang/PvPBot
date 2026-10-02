@@ -816,30 +816,101 @@ public class InventoryController {
         return ensureInHotbar(p, it -> it.getType() == Material.GOLDEN_APPLE);
     }
 
-    // Everything the bots build outside schematics (pillars, bridges, hole
-    // escapes, plugs) is end stone. A bot that has none is topped up - at
-    // most once a minute, so it isn't an endless supply mid-fight.
+    // Building outside schematics (pillars, bridges, hole escapes, plugs,
+    // voice paths and roofs): bots spawned with random names build with end
+    // stone and nothing else; every other bot uses the plain blocks it
+    // carries - cobblestone, dirt, netherrack... (cheapest first).
     public static final Material BUILD_BLOCK = Material.END_STONE;
     private int lastBuildBlockGift = Integer.MIN_VALUE / 2;
 
-    // config free-build-blocks: bots that run out of end stone mid-order
-    // (pillaring, bridging, plugging water, climbing out) get some. Off =
-    // fully vanilla: they only ever build with what they actually carry.
+    private static final Material[] PLAIN_PREFERRED = {
+            Material.COBBLESTONE, Material.COBBLED_DEEPSLATE, Material.DIRT, Material.NETHERRACK,
+            Material.STONE, Material.DEEPSLATE, Material.ANDESITE, Material.DIORITE, Material.GRANITE,
+            Material.TUFF, Material.BLACKSTONE, Material.COARSE_DIRT, Material.END_STONE,
+            Material.STONE_BRICKS, Material.OAK_PLANKS, Material.SPRUCE_PLANKS, Material.BIRCH_PLANKS};
+
+    // config free-build-blocks: bots that run out mid-order (pillaring,
+    // bridging, plugging water, climbing out) get some. Off = fully
+    // vanilla: they only ever build with what they actually carry.
     public static boolean freeBuildBlocks() {
         com.pvpbot.PvPBotPlugin pl = com.pvpbot.PvPBotPlugin.getInstance();
         return pl == null || pl.getConfig().getBoolean("free-build-blocks", true);
     }
 
+    public boolean endStoneOnly() {
+        return context.bot != null && context.bot.isRandomNamed();
+    }
+
+    // What this bot is handed when it runs out.
+    public Material giftBlock() {
+        return endStoneOnly() ? Material.END_STONE : Material.COBBLESTONE;
+    }
+
+    // Can this bot build (pillar, bridge, plug, path) with it?
+    public boolean isBuildBlock(ItemStack it) {
+        if (it == null || it.getAmount() <= 0) return false;
+        if (endStoneOnly()) return it.getType() == Material.END_STONE;
+        return isPlainBlock(it.getType()) && isPlaceableBlock(it);
+    }
+
+    // A cheap full block: solid, opaque, no gravity, nothing valuable or
+    // usable (no ores, storage blocks, chests, workstations...).
+    private static boolean isPlainBlock(Material m) {
+        if (!m.isBlock() || !m.isSolid() || !m.isOccluding() || m.hasGravity()) return false;
+        if (m.isInteractable() || m == Material.TNT) return false;
+        String n = m.name();
+        return !(n.contains("ORE") || n.contains("DIAMOND") || n.contains("EMERALD") || n.contains("NETHERITE")
+                || n.contains("GOLD") || n.contains("IRON") || n.contains("LAPIS") || n.contains("REDSTONE")
+                || n.contains("COPPER") || n.contains("AMETHYST") || n.contains("SHULKER")
+                || n.contains("SPAWNER") || n.contains("BEACON") || n.contains("ANCIENT")
+                || n.contains("QUARTZ") || n.contains("PURPUR") || n.contains("PRISMARINE")
+                || n.contains("SPONGE") || n.contains("GLASS") || n.contains("LOG") || n.contains("WOOD"));
+    }
+
+    // Hotbar slot of something this bot builds with (moved up from the
+    // backpack if needed), cheapest first. -1 if it has nothing.
+    public int findBuildBlockSlot(Player p) {
+        if (endStoneOnly()) return ensureInHotbar(p, it -> it.getType() == Material.END_STONE);
+        for (Material m : PLAIN_PREFERRED) {
+            if (!p.getInventory().contains(m)) continue;
+            int slot = ensureInHotbar(p, it -> it.getType() == m);
+            if (slot >= 0) return slot;
+        }
+        return ensureInHotbar(p, this::isBuildBlock);
+    }
+
+    public int countBuildBlocks(Player p) {
+        int n = 0;
+        for (ItemStack it : p.getInventory().getStorageContents()) {
+            if (isBuildBlock(it)) n += it.getAmount();
+        }
+        return n;
+    }
+
+    // Hand this bot `amount` of its build block (if free-build-blocks is on).
+    public boolean giveBuildBlocks(Player p, int amount) {
+        if (!freeBuildBlocks() || p == null) return false;
+        Material m = giftBlock();
+        while (amount > 0) {
+            int stack = Math.min(64, amount);
+            p.getInventory().addItem(new ItemStack(m, stack));
+            amount -= stack;
+        }
+        context.packetBroadcaster.broadcastEquipment();
+        return true;
+    }
+
+    // findBuildBlockSlot, topping the bot up (at most once a minute) when
+    // it has run dry.
     public int findBlockSlot(Player p) {
-        int slot = ensureInHotbar(p, it -> it.getType() == BUILD_BLOCK);
+        int slot = findBuildBlockSlot(p);
         if (slot >= 0) return slot;
         if (!freeBuildBlocks()) return -1;
         int now = org.bukkit.Bukkit.getCurrentTick();
         if (now - lastBuildBlockGift < 1200) return -1;
         lastBuildBlockGift = now;
-        p.getInventory().addItem(new ItemStack(BUILD_BLOCK, 32));
-        context.packetBroadcaster.broadcastEquipment();
-        return ensureInHotbar(p, it -> it.getType() == BUILD_BLOCK);
+        giveBuildBlocks(p, 32);
+        return findBuildBlockSlot(p);
     }
 
     public int findItemSlot(Player p, Material m) {
