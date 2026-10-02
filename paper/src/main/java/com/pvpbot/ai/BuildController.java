@@ -1039,7 +1039,8 @@ public class BuildController {
 
         int slot = context.inventoryController.ensureInHotbar(
                 botPlayer, it -> it.getType() == job.scaffoldMaterial());
-        if (slot < 0) {
+        if (slot < 0 && (job.scaffoldMaterial() != InventoryController.BUILD_BLOCK
+                || InventoryController.freeBuildBlocks())) {
             job.supply(botPlayer, job.scaffoldMaterial(), 32);
             slot = context.inventoryController.ensureInHotbar(
                     botPlayer, it -> it.getType() == job.scaffoldMaterial());

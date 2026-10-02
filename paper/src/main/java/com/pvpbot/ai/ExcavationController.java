@@ -671,7 +671,7 @@ public class ExcavationController {
     // Put a plain block into `at` (water) with a real place event.
     private boolean placeSeal(Player botPlayer, ServerPlayer handle, Block at) {
         int slot = sealSlot(botPlayer);
-        if (slot < 0 && !gaveSealBlocks) {
+        if (slot < 0 && !gaveSealBlocks && InventoryController.freeBuildBlocks()) {
             // Nothing to plug with: same deal as pillaring - hand out some
             // cobblestone once so the job doesn't just flood.
             botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_SEAL_BLOCKS));

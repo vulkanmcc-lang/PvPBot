@@ -428,7 +428,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     Player bp = b.getBukkitPlayer();
                     if (bp != null) crewPlayers.add(bp);
                 }
-                job.distribute(crewPlayers, job.bill());
+                if (com.pvpbot.ai.InventoryController.freeBuildBlocks()) job.distribute(crewPlayers, job.bill());
                 plugin.getBuildJobs().put(key, job);
                 for (PvPBot b : bots) {
                     b.setForcedTarget(null);
@@ -915,7 +915,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     Player bp = b.getBukkitPlayer();
                     if (bp != null) crewPlayers.add(bp);
                 }
-                job.distribute(crewPlayers, job.bill());
+                if (com.pvpbot.ai.InventoryController.freeBuildBlocks()) job.distribute(crewPlayers, job.bill());
                 plugin.getBuildJobs().put(VOICE_BUILD_PREFIX + speaker, job);
                 for (PvPBot b : builders) {
                     b.setForcedTarget(null);

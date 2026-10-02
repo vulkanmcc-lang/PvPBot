@@ -822,9 +822,18 @@ public class InventoryController {
     public static final Material BUILD_BLOCK = Material.END_STONE;
     private int lastBuildBlockGift = Integer.MIN_VALUE / 2;
 
+    // config free-build-blocks: bots that run out of end stone mid-order
+    // (pillaring, bridging, plugging water, climbing out) get some. Off =
+    // fully vanilla: they only ever build with what they actually carry.
+    public static boolean freeBuildBlocks() {
+        com.pvpbot.PvPBotPlugin pl = com.pvpbot.PvPBotPlugin.getInstance();
+        return pl == null || pl.getConfig().getBoolean("free-build-blocks", true);
+    }
+
     public int findBlockSlot(Player p) {
         int slot = ensureInHotbar(p, it -> it.getType() == BUILD_BLOCK);
         if (slot >= 0) return slot;
+        if (!freeBuildBlocks()) return -1;
         int now = org.bukkit.Bukkit.getCurrentTick();
         if (now - lastBuildBlockGift < 1200) return -1;
         lastBuildBlockGift = now;

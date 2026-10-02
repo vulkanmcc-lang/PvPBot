@@ -294,6 +294,10 @@ public class ClimbOutController {
         }
 
         if (context.inventoryController.findBlockSlot(botPlayer) < 0) {
+            if (!InventoryController.freeBuildBlocks()) {
+                finish(false);
+                return false;
+            }
             int now = Bukkit.getCurrentTick();
             if (now - lastGiftTick < GIFT_COOLDOWN) {
                 finish(false);

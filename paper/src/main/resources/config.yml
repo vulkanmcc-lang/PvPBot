@@ -6,6 +6,13 @@ prevent-faction-friendly-fire: true
 # Voice orders (PvPBot Voice Link mod): show what was understood / what went
 # wrong on the action bar. A debugging aid - off means bots just obey.
 voice-feedback: false
+
+# Bots that run out of end stone in the middle of an order (pillaring up,
+# bridging, plugging water, climbing out of a hole, a voice bridge/roof) get
+# some handed to them. false = fully vanilla bots: they only build with the
+# blocks they actually carry. ("build me a <schematic>" always supplies its
+# blocks - that's what that order is for.)
+free-build-blocks: true
 harvest-player-skins: false
 
 # ──────────────────────────────────────────────────────────────────────────────

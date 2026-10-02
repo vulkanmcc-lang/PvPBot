@@ -430,6 +430,7 @@ public class IslandBridgeController {
     }
 
     private void giveBlocks(Player p, int amount) {
+        if (!InventoryController.freeBuildBlocks()) return;
         while (amount > 0) {
             int stack = Math.min(64, amount);
             p.getInventory().addItem(new ItemStack(BLOCK, stack));

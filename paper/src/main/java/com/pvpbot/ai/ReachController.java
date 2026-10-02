@@ -85,9 +85,11 @@ public class ReachController {
         reserveColumn(x, z, baseY, towerTopY + 1);
         gaveBlocks = false;
         if (self != null && countBlocks(self) < height + 4) {
-            self.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_BLOCKS));
-            context.packetBroadcaster.broadcastEquipment();
-            gaveBlocks = true;
+            if (InventoryController.freeBuildBlocks()) {
+                self.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_BLOCKS));
+                context.packetBroadcaster.broadcastEquipment();
+                gaveBlocks = true;
+            }
         }
         return gaveBlocks;
     }
@@ -131,9 +133,11 @@ public class ReachController {
         Player self = context.bot.getBukkitPlayer();
         gaveBlocks = false;
         if (self != null && countBlocks(self) < 16) {
-            self.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_BLOCKS));
-            context.packetBroadcaster.broadcastEquipment();
-            gaveBlocks = true;
+            if (InventoryController.freeBuildBlocks()) {
+                self.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_BLOCKS));
+                context.packetBroadcaster.broadcastEquipment();
+                gaveBlocks = true;
+            }
         }
         return gaveBlocks;
     }
@@ -404,7 +408,9 @@ public class ReachController {
     private boolean place(Player botPlayer, ServerPlayer handle, Block cell, Block against) {
         int slot = context.inventoryController.findBlockSlot(botPlayer);
         if (slot < 0 || slot > 8) {
-            botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_BLOCKS));
+            if (InventoryController.freeBuildBlocks()) {
+                botPlayer.getInventory().addItem(new ItemStack(InventoryController.BUILD_BLOCK, GIVE_BLOCKS));
+            }
             slot = context.inventoryController.findBlockSlot(botPlayer);
             if (slot < 0 || slot > 8) return false;
         }
