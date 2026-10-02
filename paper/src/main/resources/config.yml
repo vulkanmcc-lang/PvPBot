@@ -24,6 +24,15 @@ harvest-player-skins: false
 # ──────────────────────────────────────────────────────────────────────────────
 performance:
 
+  # Hardware profile. auto = "low" on servers with 4 or fewer cores or less
+  # than 6 GB of heap (e.g. a Ryzen 5700X slice with 4 cores / 10 GB is low on
+  # cores), "normal" otherwise. "low" caps the settings below - it only ever
+  # lowers them: level of detail from 20 bots, 8 path requests and 8 new chunk
+  # captures per tick, shorter A* searches (6000 / 24000 maze) so the single
+  # path thread a 4-core box gets never stalls on one maze, and terrain kept
+  # cached a little longer. Check what was picked in /pvpbot performance.
+  profile: auto
+
   # Level of detail. Bots that are idle AND out of every real player's sight
   # run physics every tick but only re-run the AI decision tree every
   # `ai-lod-stride` ticks. Bots that are fighting, fleeing, escorting, hurt,

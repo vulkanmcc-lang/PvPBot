@@ -134,6 +134,8 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
                 Math.max(com.pvpbot.nav.Pathfinder.maxExpansions,
                         getConfig().getInt("performance.path-maze-max-expansions", 45000));
 
+        applyPerformanceProfile();
+
         com.pvpbot.ai.RestockController.loadConfig(getConfig().getConfigurationSection("restock"));
 
         com.pvpbot.perf.PlayerSnapshot.rebuild(
@@ -604,6 +606,48 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
         for (org.bukkit.block.Block b : event.blockList()) {
             com.pvpbot.nav.NavChunkCache.invalidate(b.getWorld(), b.getX(), b.getZ());
         }
+    }
+
+    // performance.profile: auto (default) / low / normal. "low" - picked
+    // automatically on servers with 4 or fewer cores or under 6 GB of heap -
+    // caps the budgets that cost main-thread time or memory bandwidth on a
+    // small box (one path thread, slower RAM), on top of whatever the config
+    // says: level-of-detail kicks in from fewer bots, fewer path requests and
+    // chunk captures per tick, and shorter A* searches so the single path
+    // thread never sits on one huge maze while everyone else waits.
+    private String performanceProfile = "normal";
+
+    public String getPerformanceProfile() {
+        return performanceProfile;
+    }
+
+    private void applyPerformanceProfile() {
+        int cores = Runtime.getRuntime().availableProcessors();
+        double heapGb = Runtime.getRuntime().maxMemory() / (1024.0 * 1024.0 * 1024.0);
+        String wanted = getConfig().getString("performance.profile", "auto").toLowerCase(java.util.Locale.ROOT);
+        boolean low = switch (wanted) {
+            case "low" -> true;
+            case "normal" -> false;
+            default -> cores <= 4 || heapGb < 6.0;
+        };
+        performanceProfile = low ? "low" : "normal";
+        if (low) {
+            com.pvpbot.perf.BotScheduler.minBots = Math.min(com.pvpbot.perf.BotScheduler.minBots, 20);
+            com.pvpbot.perf.BotScheduler.radius = Math.min(com.pvpbot.perf.BotScheduler.radius, 40.0);
+            com.pvpbot.perf.PathBudget.maxRequestsPerTick = Math.min(com.pvpbot.perf.PathBudget.maxRequestsPerTick, 8);
+            com.pvpbot.perf.PathBudget.reserveRequestsPerTick =
+                    Math.min(com.pvpbot.perf.PathBudget.reserveRequestsPerTick, 3);
+            com.pvpbot.perf.PathBudget.maxChunksPerTick = Math.min(com.pvpbot.perf.PathBudget.maxChunksPerTick, 160);
+            com.pvpbot.nav.NavChunkCache.capturesPerTick = Math.min(com.pvpbot.nav.NavChunkCache.capturesPerTick, 8);
+            com.pvpbot.nav.NavChunkCache.ttlTicks = Math.max(com.pvpbot.nav.NavChunkCache.ttlTicks, 300);
+            com.pvpbot.ai.PathfindingController.searchRadius =
+                    Math.min(com.pvpbot.ai.PathfindingController.searchRadius, 64);
+            com.pvpbot.nav.Pathfinder.maxExpansions = Math.min(com.pvpbot.nav.Pathfinder.maxExpansions, 6000);
+            com.pvpbot.nav.Pathfinder.mazeMaxExpansions = Math.max(com.pvpbot.nav.Pathfinder.maxExpansions,
+                    Math.min(com.pvpbot.nav.Pathfinder.mazeMaxExpansions, 24000));
+        }
+        getLogger().info(String.format(java.util.Locale.ROOT,
+                "Performance profile: %s (%d cores, %.1f GB heap)", performanceProfile, cores, heapGb));
     }
 
     public static PvPBotPlugin getInstance() {

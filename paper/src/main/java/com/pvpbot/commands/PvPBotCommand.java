@@ -198,6 +198,9 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 player.sendMessage(String.format(
                         "  §7bots: §f%d alive  §7(budget: 50ms per server tick)", alive));
                 player.sendMessage(String.format(
+                        "  §7profile: §f%s §7(%d cores) - set performance.profile: auto / low / normal",
+                        plugin.getPerformanceProfile(), Runtime.getRuntime().availableProcessors()));
+                player.sendMessage(String.format(
                         "  §7bot tick loop: §f%.2f ms §7last, §f%.2f ms §7avg", lastMs, avgMs));
                 player.sendMessage(String.format(
                         "  §7AI level of detail: §f%d full §7/ §f%d light §7last tick", full, light));

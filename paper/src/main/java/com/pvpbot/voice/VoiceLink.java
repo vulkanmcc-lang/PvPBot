@@ -484,39 +484,36 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         + (given > 0 ? " - gave " + given + " cobblestone" : ""));
             }
             case LOOK_AT_ME -> {
-                // Anyone within 5 blocks of the speaker (height ignored)
-                // backs off to ~6 blocks first, so they're not in your face;
-                // then everyone holds their spot and watches you until the
-                // next order.
+                // Nobody stands within LOOK_CLEARANCE of the speaker - a
+                // cylinder with no top or bottom, so a bot above you or in a
+                // cave under you counts too. Bots inside back out first; a
+                // share of them then pillar up on their own column; then
+                // everyone holds their spot and watches you until the next
+                // order. If you walk up to them, they back off again.
                 UUID id = speaker.getUniqueId();
                 Location sp = speaker.getLocation();
                 java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
-                int backing = 0;
-                for (PvPBot b : bots) {
-                    Player bp = b.getBukkitPlayer();
-                    if (bp == null || bp.getWorld() != sp.getWorld()) continue;
-                    double dx = bp.getLocation().getX() - sp.getX(), dz = bp.getLocation().getZ() - sp.getZ();
-                    double flat = Math.hypot(dx, dz);
-                    if (flat >= LOOK_CLEARANCE) continue;
-                    if (flat < 0.3) {
-                        double a = rnd.nextDouble() * Math.PI * 2;
-                        dx = Math.cos(a);
-                        dz = Math.sin(a);
-                        flat = 1.0;
-                    }
-                    double out = LOOK_CLEARANCE + 1.0 + rnd.nextDouble();
-                    int x = (int) Math.floor(sp.getX() + dx / flat * out);
-                    int z = (int) Math.floor(sp.getZ() + dz / flat * out);
-                    int y = groundNear(sp.getWorld(), x, z, bp.getLocation().getBlockY());
-                    Location dest = new Location(sp.getWorld(), x + 0.5, y, z + 0.5);
-                    dest.setYaw((float) Math.toDegrees(Math.atan2(-(sp.getX() - dest.getX()), sp.getZ() - dest.getZ())));
-                    b.orderToFormationSlot(dest, 200);
-                    backing++;
-                }
                 List<PvPBot> crew = new ArrayList<>(bots);
+
+                List<PvPBot> shuffled = new ArrayList<>(crew);
+                java.util.Collections.shuffle(shuffled);
+                int pillarCount = crew.size() >= 2
+                        ? Math.max(1, (int) Math.round(crew.size() * LOOK_PILLAR_SHARE)) : 0;
+                Map<PvPBot, Integer> pillarHeight = new HashMap<>();
+                for (int i = 0; i < pillarCount && i < shuffled.size(); i++) {
+                    pillarHeight.put(shuffled.get(i), LOOK_PILLAR_MIN + rnd.nextInt(LOOK_PILLAR_MAX - LOOK_PILLAR_MIN + 1));
+                }
+
+                int backing = 0;
+                for (PvPBot b : crew) {
+                    if (backOutOfClearance(b, sp)) backing++;
+                }
+
                 Crewed look = new Crewed(crew);
                 lookTasks.add(look);
                 final int[] left = {LOOK_TICKS};
+                java.util.Set<PvPBot> towered = new java.util.HashSet<>();
+                java.util.Set<Long> takenColumns = new java.util.HashSet<>();
                 look.task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
                     Player p = Bukkit.getPlayer(id);
                     if (p == null || !p.isOnline() || --left[0] <= 0 || crew.isEmpty()) {
@@ -524,14 +521,41 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         lookTasks.remove(look);
                         return;
                     }
+                    Location here = p.getLocation();
                     Location eye = p.getEyeLocation();
+                    boolean recheck = left[0] % 10 == 0;
                     for (PvPBot b : crew) {
                         Player bp = b.getBukkitPlayer();
                         if (bp == null || !b.isAlive() || bp.getWorld() != eye.getWorld()) continue;
                         var ctx = b.getAI().getContext();
+                        boolean climbing = ctx.reachController.isActive();
+
+                        // The barrier, against where you are now.
+                        if (recheck && ctx.target == null && !climbing && ctx.formationSlot == null
+                                && flatDistance(bp.getLocation(), here) < LOOK_CLEARANCE) {
+                            backOutOfClearance(b, here);
+                            towered.remove(b);
+                            continue;
+                        }
                         if (ctx.formationSlot != null) continue; // still backing off
+
+                        Integer height = pillarHeight.get(b);
+                        if (height != null && !towered.contains(b)) {
+                            // Out of the way: build up on a column of its own.
+                            int[] col = freeColumnNear(bp.getLocation(), takenColumns);
+                            towered.add(b);
+                            if (col != null && Math.hypot(col[0] + 0.5 - here.getX(), col[1] + 0.5 - here.getZ())
+                                    >= LOOK_CLEARANCE) {
+                                takenColumns.add(columnKey(col[0], col[1]));
+                                if (ctx.voiceHold) b.clearGuardPost();
+                                ctx.reachController.startTower(col[0], col[1], height);
+                                continue;
+                            }
+                        }
+                        if (climbing) continue; // still pillaring
+
                         if (ctx.guardAnchor == null) {
-                            // Arrived (or couldn't go further): stay right here.
+                            // Arrived / up top: stay right here.
                             b.setGuardPost(bp.getLocation(), HOLD_RADIUS, bp.getLocation().getYaw());
                             ctx.voiceHold = true;
                         }
@@ -545,8 +569,9 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                         ctx.requestLook(yaw, pitch, com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
                     }
                 }, 0L, 1L);
-                ok(speaker, transcript, who + " → looking at you and staying put (" + bots.size() + ")"
-                        + (backing > 0 ? " - " + backing + " backing off first" : ""));
+                ok(speaker, transcript, who + " → looking at you (" + bots.size() + ")"
+                        + (backing > 0 ? " - " + backing + " backing off first" : "")
+                        + (pillarCount > 0 ? ", " + pillarCount + " pillaring up" : ""));
             }
             case ARMOR_ON, ARMOR_OFF -> {
                 boolean on = order.intent() == Intent.ARMOR_ON;
@@ -1124,7 +1149,39 @@ public final class VoiceLink implements PluginMessageListener, Listener {
     private static final int BUILD_UP_HEIGHT = 10;
     // "look at me" lasts until the next order (capped at 30 minutes).
     private static final int LOOK_TICKS = 20 * 60 * 30;
-    private static final double LOOK_CLEARANCE = 5.0;
+    // "look at me": nobody within this many blocks of you, at any height.
+    private static final double LOOK_CLEARANCE = 10.0;
+    // Share of the bots that pillar up (3-6 blocks) before watching.
+    private static final double LOOK_PILLAR_SHARE = 0.34;
+    private static final int LOOK_PILLAR_MIN = 3;
+    private static final int LOOK_PILLAR_MAX = 6;
+
+    // Send a bot standing inside the look-at-me barrier (any height) out to
+    // just past it, straight away from `center`. False if it's already out.
+    private boolean backOutOfClearance(PvPBot b, Location center) {
+        Player bp = b.getBukkitPlayer();
+        if (bp == null || bp.getWorld() != center.getWorld()) return false;
+        double dx = bp.getLocation().getX() - center.getX(), dz = bp.getLocation().getZ() - center.getZ();
+        double flat = Math.hypot(dx, dz);
+        if (flat >= LOOK_CLEARANCE) return false;
+        java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
+        if (flat < 0.3) {
+            double a = rnd.nextDouble() * Math.PI * 2;
+            dx = Math.cos(a);
+            dz = Math.sin(a);
+            flat = 1.0;
+        }
+        double out = LOOK_CLEARANCE + 1.0 + rnd.nextDouble() * 2.0;
+        int x = (int) Math.floor(center.getX() + dx / flat * out);
+        int z = (int) Math.floor(center.getZ() + dz / flat * out);
+        int y = groundNear(center.getWorld(), x, z, bp.getLocation().getBlockY());
+        Location dest = new Location(center.getWorld(), x + 0.5, y, z + 0.5);
+        dest.setYaw((float) Math.toDegrees(Math.atan2(-(center.getX() - dest.getX()), center.getZ() - dest.getZ())));
+        // A post inside the barrier would just walk it back in.
+        if (b.getAI().getContext().guardAnchor != null) b.clearGuardPost();
+        b.orderToFormationSlot(dest, 200);
+        return true;
+    }
 
     private static long columnKey(int x, int z) {
         return ((long) x << 32) ^ (z & 0xffffffffL);
