@@ -177,12 +177,8 @@ public final class CinematicJoin {
             marks = marks.subList(0, MAX_BOTS);
         }
 
-        // They join whatever faction the player running this is in - or, if
-        // they're in none, a shared "cinematic" faction, so the bots are
-        // always on the same side and never treat each other as targets.
-        String playerFaction = manager.getPlayerFaction(player.getUniqueId());
-        final String faction = playerFaction != null ? playerFaction : CINEMATIC_FACTION;
-        if (!manager.factionExists(faction)) manager.createFaction(faction);
+        // They join whatever faction the player running this is in.
+        String faction = manager.getPlayerFaction(player.getUniqueId());
 
         List<PvPBot> spawned = new ArrayList<>();
         List<Location> spots = marks;
@@ -192,10 +188,10 @@ public final class CinematicJoin {
                 PvPBot bot = manager.spawnBot(spot.clone(), faction, NameGenerator.NameStyle.ALT);
                 if (bot == null) continue;
                 bot.equipKit(kit);
-                // Frozen: no moving, no fighting, nothing - just standing
-                // there. Weapons down on top, so even a bot that somehow got
-                // unfrozen won't pick a fight on its own.
-                freeze(manager, bot);
+                // Frozen: no moving, no fighting, nothing - just standing there.
+                BotSettings bs = manager.getBotSettings(bot.getUUID());
+                bs.setFrozen(true);
+                bs.setHostile(false);
                 spawned.add(bot);
             }
         });
@@ -204,44 +200,14 @@ public final class CinematicJoin {
             return true;
         }
 
-        new WatchLeader(manager, playerFaction, player.getUniqueId(), spawned).runTaskTimer(plugin, 1L, 1L);
-
-        // Two seconds on, make sure every one of them really is frozen - put
-        // any that isn't back, and say so.
-        UUID owner = player.getUniqueId();
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            int fixed = 0;
-            for (PvPBot b : spawned) {
-                if (!b.isAlive()) continue;
-                BotSettings bs = manager.getBotSettings(b.getUUID());
-                if (bs != null && bs.isFrozen() && !bs.isHostile()) continue;
-                freeze(manager, b);
-                fixed++;
-            }
-            Player p = Bukkit.getPlayer(owner);
-            if (p != null && fixed > 0) {
-                p.sendMessage("§e" + fixed + " cinematic bot(s) had lost their freeze - frozen again.");
-            }
-        }, 40L);
+        new WatchLeader(manager, faction, player.getUniqueId(), spawned).runTaskTimer(plugin, 1L, 1L);
         player.sendMessage("§d§lCinematic §r§7- §e" + spawned.size() + "§7 frozen bot(s) on your spots with kit §e"
-                + kit.toLowerCase() + "§7 in faction §e" + faction.toLowerCase()
+                + kit.toLowerCase() + "§7" + (faction != null ? " in faction §e" + faction.toLowerCase() : "")
                 + "§7 - they look around confused for a bit, then watch "
-                + (playerFaction != null ? "the faction leader" : "you") + ".");
+                + (faction != null ? "the faction leader" : "you") + ".");
         player.sendMessage("§8Unfreeze them when the scene's done: /pvpbot set "
-                + faction.toLowerCase() + " frozen false");
+                + (faction != null ? faction.toLowerCase() : "<bot>") + " frozen false");
         return true;
-    }
-
-    private static final String CINEMATIC_FACTION = "cinematic";
-
-    private static void freeze(BotManager manager, PvPBot bot) {
-        BotSettings bs = manager.getBotSettings(bot.getUUID());
-        bs.setFrozen(true);
-        bs.setHostile(false);
-        var ctx = bot.getAI().getContext();
-        ctx.holdFire = true;
-        ctx.target = null;
-        bot.setForcedTarget(null);
     }
 
     // How long a freshly spawned bot looks around, lost, before it settles
@@ -313,8 +279,6 @@ public final class CinematicJoin {
                 Player bp = b.getBukkitPlayer();
                 BotSettings bs = manager.getBotSettings(b.getUUID());
                 if (!b.isAlive() || bp == null || bs == null || !bs.isFrozen()) {
-                    // Unfrozen for the next scene: weapons back up too.
-                    if (b.isAlive() && bs != null && !bs.isFrozen()) b.getAI().getContext().holdFire = false;
                     it.remove();
                     continue;
                 }
