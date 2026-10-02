@@ -49,7 +49,8 @@ public final class VoiceCommandParser {
         MINE_TO,    // dig straight down (then across) to a player below
         SCATTER,    // everyone runs off in a different direction
         ISLAND_BRIDGE, // the End: bridge from this island to the nearest other one
-        BUILD_SCHEM // "build me a <marked schematic> here"
+        BUILD_SCHEM, // "build me a <marked schematic> here"
+        TAKE_COVER  // roof over the group; bots further out run in under it
     }
 
     // SELF: the speaker ("mine down to me").
@@ -151,6 +152,14 @@ public final class VoiceCommandParser {
                     "abort", "peace"),
             rule(Intent.ENGAGE,
                     "weapons free", "fight back", "free fire", "you can fight", "engage", "go wild"),
+            rule(Intent.TAKE_COVER,
+                    "take cover", "get to cover", "get into cover", "get in cover", "get under cover",
+                    "find cover", "find some cover", "go to cover", "into cover",
+                    "take shelter", "find shelter", "get to shelter", "get under shelter", "build a shelter",
+                    "make a shelter", "build shelter", "build a roof", "make a roof", "build us a roof",
+                    "make us a roof", "build a roof over us", "put a roof over us", "roof over us",
+                    "cover us", "cover up", "everyone under the roof", "get under the roof",
+                    "duck and cover", "hide"),
             rule(Intent.ISLAND_BRIDGE,
                     "bridge to the next island", "bridge to the nearest island", "bridge to the closest island",
                     "bridge to another island", "bridge to the other island", "bridge to that island",

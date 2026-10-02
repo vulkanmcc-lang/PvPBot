@@ -258,11 +258,13 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         };
         if (interrupts) {
             for (PvPBot b : bots) interrupt(b);
-            if (order.intent() != Intent.PATH) dropOrphanedVoiceBuild(speaker.getUniqueId(), manager);
+            if (order.intent() != Intent.PATH && order.intent() != Intent.TAKE_COVER) {
+                dropOrphanedVoiceBuild(speaker.getUniqueId(), manager);
+            }
         }
         boolean movement = switch (order.intent()) {
             case COME, FOLLOW, WAIT, ADVANCE, MINE, DESTROY, TUNNEL, BUILD_UP, PATH, FORMATION, BREAK_FORMATION,
-                 MINE_TO, SCATTER, ISLAND_BRIDGE -> true;
+                 MINE_TO, SCATTER, ISLAND_BRIDGE, TAKE_COVER -> true;
             default -> false;
         };
         if (movement && order.intent() != Intent.FORMATION && order.subjectBot() == null && !order.commander()) {
@@ -389,6 +391,18 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     ok(speaker, transcript, who + " → shooting " + vName + " (" + archers + " with bows"
                             + (melee > 0 ? ", " + melee + " without - melee" : "") + ")");
                 }
+            }
+            case TAKE_COVER -> {
+                CoverRun old = coverRuns.remove(speaker.getUniqueId());
+                if (old != null) old.end();
+                stopVoiceBuild(speaker.getUniqueId(), manager);
+                CoverRun run = new CoverRun(speaker, bots, who);
+                String result = run.start(manager);
+                if (result == null) {
+                    fail(speaker, transcript, "nobody close enough to take cover with you");
+                    return;
+                }
+                ok(speaker, transcript, who + " → " + result);
             }
             case PATH -> {
                 org.bukkit.block.Block aim = speaker.getTargetBlockExact(160);
@@ -814,6 +828,7 @@ public final class VoiceLink implements PluginMessageListener, Listener {
         for (List<Crewed> list : followTasks.values()) removeFrom(list, b);
         removeFrom(lookTasks, b);
         for (BuildRun run : buildRuns.values()) run.crew.remove(b);
+        for (CoverRun run : coverRuns.values()) run.forget(b);
         b.setForcedTarget(null);
         ctx.target = null;
     }
@@ -826,6 +841,158 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                 it.remove();
             }
         }
+    }
+
+    // ---- "everyone take cover"
+
+    private final Map<UUID, CoverRun> coverRuns = new HashMap<>();
+
+    // Bots this close to the speaker build the roof; the rest, out to
+    // COVER_RANGE, sprint over to stand under it. Everyone ends up holding
+    // a spot under the roof until the next order.
+    private static final double COVER_BUILDER_RANGE = 14.0;
+    private static final double COVER_RANGE = 50.0;
+    private static final int COVER_MIN_BUILDERS = 2;
+    private static final int COVER_RUN_TICKS = 20 * 40;
+    private static final int COVER_TIMEOUT_TICKS = 20 * 60 * 4;
+
+    private final class CoverRun {
+        final UUID speaker;
+        final String who;
+        final List<PvPBot> candidates;
+        final Map<PvPBot, Location> spotOf = new HashMap<>();
+        final java.util.Set<PvPBot> builders = new java.util.HashSet<>();
+        final java.util.Set<PvPBot> runners = new java.util.HashSet<>();
+        final java.util.Set<PvPBot> posted = new java.util.HashSet<>();
+        com.pvpbot.schem.BuildJob job;
+        BukkitTask task;
+        int ticks;
+
+        CoverRun(Player speaker, List<PvPBot> bots, String who) {
+            this.speaker = speaker.getUniqueId();
+            this.who = who;
+            this.candidates = new ArrayList<>(bots);
+        }
+
+        // Plans the roof, splits builders and runners, hands out spots.
+        // Returns the feedback line, or null when no bot is in range.
+        String start(BotManager manager) {
+            Player sp = Bukkit.getPlayer(speaker);
+            if (sp == null) return null;
+            Location center = sp.getLocation();
+
+            List<PvPBot> inRange = new ArrayList<>();
+            for (PvPBot b : candidates) {
+                Player bp = b.getBukkitPlayer();
+                if (bp == null || bp.getWorld() != center.getWorld()) continue;
+                if (flatDistance(bp.getLocation(), center) <= COVER_RANGE) inRange.add(b);
+            }
+            if (inRange.isEmpty()) return null;
+            inRange.sort(java.util.Comparator.comparingDouble(
+                    b -> flatDistance(b.getBukkitPlayer().getLocation(), center)));
+
+            for (PvPBot b : inRange) {
+                double d = flatDistance(b.getBukkitPlayer().getLocation(), center);
+                if (d <= COVER_BUILDER_RANGE || builders.size() < COVER_MIN_BUILDERS) builders.add(b);
+                else runners.add(b);
+            }
+
+            com.pvpbot.schem.ShelterPlan.Plan plan =
+                    com.pvpbot.schem.ShelterPlan.plan(center, inRange.size() + 1);
+            List<Location> spots = plan.spots();
+            for (int i = 0; i < inRange.size(); i++) {
+                Location spot = spots.isEmpty() ? center.clone()
+                        : spots.get(Math.min(spots.size() - 1, i + 1)).clone(); // spot 0 is the speaker's
+                spotOf.put(inRange.get(i), spot);
+            }
+
+            if (!plan.blocks().isEmpty()) {
+                job = com.pvpbot.schem.BuildJob.fromPlacements("shelter", center.getWorld(), plan.blocks(),
+                        center.getBlockX(), center.getBlockY() - 1, center.getBlockZ(), who);
+                job.setScaffoldMaterial(com.pvpbot.ai.InventoryController.BUILD_BLOCK);
+                List<Player> crewPlayers = new ArrayList<>();
+                for (PvPBot b : builders) {
+                    Player bp = b.getBukkitPlayer();
+                    if (bp != null) crewPlayers.add(bp);
+                }
+                job.distribute(crewPlayers, job.bill());
+                plugin.getBuildJobs().put(VOICE_BUILD_PREFIX + speaker, job);
+                for (PvPBot b : builders) {
+                    b.setForcedTarget(null);
+                    b.getAI().getContext().buildController.assign(job);
+                }
+            } else {
+                // Already under a roof: everyone just gets in under it.
+                runners.addAll(builders);
+                builders.clear();
+            }
+            for (PvPBot b : runners) {
+                b.setForcedTarget(null);
+                b.orderRunTo(spotOf.get(b), COVER_RUN_TICKS);
+            }
+
+            coverRuns.put(speaker, this);
+            task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 10L, 10L);
+
+            int side = plan.half() * 2 + 1;
+            if (job == null) {
+                return "already under cover - everyone in close (" + runners.size() + ")";
+            }
+            return "taking cover: " + builders.size() + " building a " + side + "x" + side + " roof ("
+                    + job.total() + " blocks)" + (runners.isEmpty() ? "" : ", " + runners.size() + " running in");
+        }
+
+        void tick() {
+            ticks += 10;
+            for (PvPBot b : new ArrayList<>(spotOf.keySet())) {
+                if (!b.isAlive()) {
+                    forget(b);
+                    continue;
+                }
+                if (posted.contains(b)) continue;
+                var ctx = b.getAI().getContext();
+                boolean ready;
+                if (builders.contains(b)) {
+                    // Done with (or dropped from) the roof.
+                    ready = job == null || ctx.buildController.currentJob() != job;
+                } else {
+                    // Run order over (arrived, or ran out of time).
+                    ready = ctx.formationSlot == null;
+                }
+                if (!ready) continue;
+                Location spot = spotOf.get(b);
+                b.setGuardPost(spot, 2.0, spot.getYaw());
+                ctx.voiceHold = true;
+                posted.add(b);
+            }
+            boolean jobOver = job == null || job.isFinished() || job.isCancelled();
+            if (spotOf.isEmpty() || (jobOver && posted.size() >= spotOf.size())
+                    || ticks >= COVER_TIMEOUT_TICKS) {
+                Player sp = Bukkit.getPlayer(speaker);
+                if (sp != null && job != null && job.isFinished()) {
+                    feedback(sp, Component.text("🎙 " + who + " → roof's up, everyone's under it",
+                            NamedTextColor.GREEN));
+                }
+                end();
+            }
+        }
+
+        void forget(PvPBot b) {
+            spotOf.remove(b);
+            builders.remove(b);
+            runners.remove(b);
+            posted.remove(b);
+        }
+
+        void end() {
+            if (task != null) task.cancel();
+            coverRuns.remove(speaker, this);
+        }
+    }
+
+    private static double flatDistance(Location a, Location b) {
+        double dx = a.getX() - b.getX(), dz = a.getZ() - b.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
     }
 
     // ---- voice builds: "build me a <name> here"
