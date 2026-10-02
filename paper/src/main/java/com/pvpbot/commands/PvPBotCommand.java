@@ -3439,7 +3439,8 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                     completions.addAll(List.of("create", "disband", "list", "info"));
                     completions.addAll(mgr.getGroupNames());
                 }
-                case "cinematic" -> completions.addAll(List.of("spawn", "circle", "stop"));
+                case "cinematic" -> completions.addAll(List.of("spawn", "markcoordinates", "marks", "unmark",
+                        "clearmarks", "circle", "stop"));
                 case "set" -> {
                     completions.addAll(List.of("all", "global"));
                     completions.addAll(mgr.getFactionNames());
@@ -3480,6 +3481,11 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
 
             if (baseCmd.equals("faction") && secondArg.equals("armor")) {
                 completions.addAll(List.of("on", "off", "best", "worst"));
+            }
+
+            if (baseCmd.equals("cinematic") && secondArg.equals("spawn")) {
+                ConfigurationSection kits = plugin.getKitManager().getKitsConfig().getConfigurationSection("kits");
+                if (kits != null) completions.addAll(kits.getKeys(false));
             }
 
             if (baseCmd.equals("guard")) {

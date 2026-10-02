@@ -45,14 +45,61 @@ public final class CinematicJoin {
             return handleCircle(player, args, plugin, manager);
         }
 
+        if (sub.equals("markcoordinates") || sub.equals("mark")) {
+            List<Location> marks = loadMarks(plugin, player.getUniqueId());
+            Location here = player.getLocation().clone();
+            marks.add(here);
+            saveMarks(plugin, player.getUniqueId(), marks);
+            player.sendMessage(String.format(java.util.Locale.ROOT,
+                    "§d§lCinematic §r§7- marked §f%d, %d, %d§7 (§e%d§7 spot%s). "
+                            + "§f/pvpbot cinematic spawn <kit>§7 puts a bot on each.",
+                    here.getBlockX(), here.getBlockY(), here.getBlockZ(), marks.size(), marks.size() == 1 ? "" : "s"));
+            return true;
+        }
+
+        if (sub.equals("marks")) {
+            List<Location> marks = loadMarks(plugin, player.getUniqueId());
+            if (marks.isEmpty()) {
+                player.sendMessage("§7No marked spots - stand somewhere and §f/pvpbot cinematic markcoordinates§7.");
+                return true;
+            }
+            player.sendMessage("§d§lCinematic spots §r§7(" + marks.size() + "):");
+            for (int i = 0; i < marks.size(); i++) {
+                Location l = marks.get(i);
+                player.sendMessage(String.format(java.util.Locale.ROOT, "  §8%d. §f%s %d, %d, %d",
+                        i + 1, l.getWorld() == null ? "?" : l.getWorld().getName(),
+                        l.getBlockX(), l.getBlockY(), l.getBlockZ()));
+            }
+            return true;
+        }
+
+        if (sub.equals("clearmarks") || sub.equals("unmark")) {
+            List<Location> marks = loadMarks(plugin, player.getUniqueId());
+            if (sub.equals("unmark") && !marks.isEmpty()) {
+                marks.remove(marks.size() - 1);
+                saveMarks(plugin, player.getUniqueId(), marks);
+                player.sendMessage("§7Removed the last spot (§e" + marks.size() + "§7 left).");
+            } else {
+                saveMarks(plugin, player.getUniqueId(), new ArrayList<>());
+                player.sendMessage("§7Cleared all your cinematic spots.");
+            }
+            return true;
+        }
+
         if (!sub.equals("spawn")) {
             sendUsage(player);
             return true;
         }
 
         if (args.length < 3) {
-            player.sendMessage("§cUsage: /pvpbot cinematic spawn <bots>");
+            player.sendMessage("§cUsage: /pvpbot cinematic spawn <kit> §7(one bot per marked spot) "
+                    + "§cor §f/pvpbot cinematic spawn <bots>");
             return true;
+        }
+
+        // "spawn <kit>": a bot on every marked spot.
+        if (!args[2].matches("\\d+")) {
+            return spawnOnMarks(player, args[2], plugin, manager);
         }
 
         int count;
@@ -81,8 +128,155 @@ public final class CinematicJoin {
         return true;
     }
 
+    // ---- marked spots: /pvpbot cinematic markcoordinates, spawn <kit>
+
+    private static String marksPath(UUID player) {
+        return "cinematic-marks." + player;
+    }
+
+    private static List<Location> loadMarks(PvPBotPlugin plugin, UUID player) {
+        List<Location> out = new ArrayList<>();
+        for (String line : plugin.getConfig().getStringList(marksPath(player))) {
+            String[] p = line.split(",");
+            if (p.length < 6) continue;
+            org.bukkit.World w = Bukkit.getWorld(p[0]);
+            if (w == null) continue;
+            try {
+                out.add(new Location(w, Double.parseDouble(p[1]), Double.parseDouble(p[2]), Double.parseDouble(p[3]),
+                        Float.parseFloat(p[4]), Float.parseFloat(p[5])));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return out;
+    }
+
+    private static void saveMarks(PvPBotPlugin plugin, UUID player, List<Location> marks) {
+        List<String> lines = new ArrayList<>();
+        for (Location l : marks) {
+            if (l.getWorld() == null) continue;
+            lines.add(String.format(java.util.Locale.ROOT, "%s,%.3f,%.3f,%.3f,%.1f,%.1f",
+                    l.getWorld().getName(), l.getX(), l.getY(), l.getZ(), l.getYaw(), l.getPitch()));
+        }
+        plugin.getConfig().set(marksPath(player), lines.isEmpty() ? null : lines);
+        plugin.saveConfig();
+    }
+
+    // How long a freshly spawned bot stands there looking around, lost,
+    // before it starts acting like itself (on its spot).
+    private static final int CONFUSED_MIN_TICKS = 100;
+    private static final int CONFUSED_MAX_TICKS = 200;
+
+    private static boolean spawnOnMarks(Player player, String kit, PvPBotPlugin plugin, BotManager manager) {
+        KitManager kitManager = plugin.getKitManager();
+        if (!kitManager.kitExists(kit)) {
+            player.sendMessage("§cKit '§e" + kit + "§c' does not exist.");
+            return true;
+        }
+        List<Location> marks = loadMarks(plugin, player.getUniqueId());
+        if (marks.isEmpty()) {
+            player.sendMessage("§cNo marked spots - stand somewhere and §f/pvpbot cinematic markcoordinates§c first.");
+            return true;
+        }
+        if (marks.size() > MAX_BOTS) {
+            player.sendMessage("§eCapped at " + MAX_BOTS + " bots.");
+            marks = marks.subList(0, MAX_BOTS);
+        }
+
+        List<PvPBot> spawned = new ArrayList<>();
+        List<Location> spots = marks;
+        // Random-style names, black skins.
+        PvPBot.spawningWithBlackSkin(() -> {
+            for (Location spot : spots) {
+                PvPBot bot = manager.spawnBot(spot.clone(), null, NameGenerator.NameStyle.ALT);
+                if (bot == null) continue;
+                bot.equipKit(kit);
+                var ctx = bot.getAI().getContext();
+                // Rooted to the spot (fights only right around it), weapons
+                // down while it gets its bearings.
+                bot.setGuardPost(spot.clone(), 2.0, spot.getYaw());
+                ctx.voiceHold = true;
+                ctx.holdFire = true;
+                spawned.add(bot);
+            }
+        });
+        if (spawned.isEmpty()) {
+            player.sendMessage("§cCouldn't spawn any bots there.");
+            return true;
+        }
+
+        new Confused(spawned).runTaskTimer(plugin, 1L, 1L);
+        player.sendMessage("§d§lCinematic §r§7- §e" + spawned.size() + "§7 bot(s) on your spots with kit §e"
+                + kit.toLowerCase() + "§7. They stay put, look around confused for a bit, then hold their spots.");
+        return true;
+    }
+
+    // Each bot, rooted to its spot, glances around like it just woke up
+    // somewhere it doesn't recognise: quick head turns to random directions,
+    // looking up and down, the odd double-take - then it calms down,
+    // weapons back up, still holding its spot.
+    private static final class Confused extends BukkitRunnable {
+        private final List<PvPBot> bots;
+        private final java.util.Map<PvPBot, float[]> look = new java.util.HashMap<>();
+        private final java.util.Map<PvPBot, Integer> left = new java.util.HashMap<>();
+        private final java.util.Map<PvPBot, Integer> nextTurn = new java.util.HashMap<>();
+
+        Confused(List<PvPBot> bots) {
+            this.bots = new ArrayList<>(bots);
+            ThreadLocalRandom r = ThreadLocalRandom.current();
+            for (PvPBot b : bots) {
+                left.put(b, r.nextInt(CONFUSED_MIN_TICKS, CONFUSED_MAX_TICKS + 1));
+                nextTurn.put(b, r.nextInt(2, 10));
+            }
+        }
+
+        @Override
+        public void run() {
+            ThreadLocalRandom r = ThreadLocalRandom.current();
+            for (java.util.Iterator<PvPBot> it = bots.iterator(); it.hasNext(); ) {
+                PvPBot b = it.next();
+                Player bp = b.getBukkitPlayer();
+                if (!b.isAlive() || bp == null) {
+                    it.remove();
+                    continue;
+                }
+                var ctx = b.getAI().getContext();
+                int t = left.merge(b, -1, Integer::sum);
+                if (t <= 0 || !ctx.holdFire) {
+                    // Done (or someone gave it an order meanwhile).
+                    ctx.holdFire = false;
+                    it.remove();
+                    continue;
+                }
+                ctx.forwardInput = 0f;
+                ctx.strafeInput = 0f;
+
+                int turn = nextTurn.merge(b, -1, Integer::sum);
+                float[] aim = look.get(b);
+                if (aim == null || turn <= 0) {
+                    float yaw = bp.getLocation().getYaw();
+                    float newYaw;
+                    if (r.nextDouble() < 0.25 && aim != null) {
+                        // Double-take: snap back the way it just looked.
+                        newYaw = aim[0] + (r.nextBoolean() ? 160f : -160f) + (float) r.nextGaussian() * 15f;
+                    } else {
+                        newYaw = yaw + (float) ((r.nextDouble() - 0.5) * 300.0);
+                    }
+                    float newPitch = (float) Math.max(-50.0, Math.min(55.0, r.nextGaussian() * 25.0));
+                    aim = new float[]{newYaw, newPitch};
+                    look.put(b, aim);
+                    nextTurn.put(b, r.nextInt(12, 36));
+                }
+                ctx.requestLook(aim[0], aim[1], com.pvpbot.ai.BotAIContext.LOOK_CRITICAL - 1, false);
+            }
+            if (bots.isEmpty()) cancel();
+        }
+    }
+
     private static void sendUsage(Player player) {
         player.sendMessage("§6§lCinematic:");
+        player.sendMessage("§e /pvpbot cinematic markcoordinates §7- mark where you stand (as many as you like)");
+        player.sendMessage("§e /pvpbot cinematic spawn <kit> §7- a black-skinned, random-named bot with that kit on every mark");
+        player.sendMessage("§e /pvpbot cinematic marks §7/ §eunmark §7/ §eclearmarks §7- list / drop the last / drop all marks");
         player.sendMessage("§e /pvpbot cinematic spawn <bots> §7- simulates players joining at world spawn");
         player.sendMessage("§e /pvpbot cinematic circle <amount> <faction> <kit> §7- rings of invisible bots around you, armor in their pack");
         player.sendMessage("§e /pvpbot cinematic stop §7- cancels the current sequence");
