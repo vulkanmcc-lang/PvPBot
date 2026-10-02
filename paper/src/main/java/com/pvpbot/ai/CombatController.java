@@ -1027,19 +1027,11 @@ public class CombatController {
             return;
         }
 
-        lookAtBlock(botPlayer, placeBlock);
-
-        botPlayer.getInventory().setHeldItemSlot(webSlot);
-        context.packetBroadcaster.broadcastEquipment();
-        ServerPlayer handle = context.bot.getHandle();
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        ItemStack webItem = botPlayer.getInventory().getItem(webSlot);
-        if (webItem != null) {
-            placeBlock.setType(Material.COBWEB);
-            webItem.setAmount(webItem.getAmount() - 1);
-            if (webItem.getAmount() <= 0) botPlayer.getInventory().setItem(webSlot, null);
+        // A real right click on the floor / wall next to their feet (a web
+        // has no collision, so vanilla lets it go in around them).
+        if (!VanillaWorld.place(context, botPlayer, webSlot, placeBlock, null, null)) {
+            context.cobwebCooldown = 10;
+            return;
         }
 
         botPlayer.getInventory().setHeldItemSlot(context.inventoryController.findBestWeaponSlot(botPlayer));
@@ -1113,26 +1105,18 @@ public class CombatController {
         steerOutOfWeb(botPlayer, loc);
 
         int waterSlot = context.inventoryController.findItemSlot(botPlayer, Material.WATER_BUCKET);
-        if (waterSlot >= 0 && waterSlot <= 8) {
-            ItemStack offhandBackup = botPlayer.getInventory().getItemInOffHand().clone();
-            botPlayer.getInventory().setHeldItemSlot(waterSlot);
-            context.packetBroadcaster.broadcastEquipment();
-
-            Block placeLoc = feet.getType() == Material.COBWEB ? feet : head;
-
-            lookAtBlock(botPlayer, placeLoc);
-
-            placeLoc.setType(Material.WATER);
-            context.placedWaterLoc = placeLoc.getLocation().clone();
-            context.waterScoopTimer = 10;
-
-            botPlayer.getInventory().setItem(waterSlot, new ItemStack(Material.BUCKET));
-
-            context.bot.getHandle().swing(InteractionHand.MAIN_HAND, true);
-            context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
-            botPlayer.getInventory().setItemInOffHand(offhandBackup);
-            context.packetBroadcaster.broadcastEquipment();
-            return true;
+        if (waterSlot >= 0 && waterSlot <= 8 && context.waterScoopTimer <= 0) {
+            // Bucket the web, as players do: the click lands on the web's
+            // outline, the water goes in on top of it and washes the web
+            // away as it flows down.
+            Block web = feet.getType() == Material.COBWEB ? feet : head;
+            if (VanillaWorld.useBucketOn(context, botPlayer, waterSlot, web)) {
+                Block source = web.getRelative(0, 1, 0);
+                context.placedWaterLoc = source.getType() == Material.WATER
+                        ? source.getLocation().clone() : web.getLocation().clone();
+                context.waterScoopTimer = 10;
+                return true;
+            }
         }
 
         // Cut our way out with the best thing we carry: shears are fastest,
@@ -1147,14 +1131,14 @@ public class CombatController {
             int shears = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == Material.SHEARS);
             int sword = shears >= 0 ? -1 : context.inventoryController.findBestSwordSlot(botPlayer);
             int slot = shears >= 0 ? shears : sword;
-            java.util.concurrent.ThreadLocalRandom rnd = java.util.concurrent.ThreadLocalRandom.current();
             if (slot >= 0 && slot <= 8) {
                 botPlayer.getInventory().setHeldItemSlot(slot);
                 context.packetBroadcaster.broadcastEquipment();
-                context.cobwebBreakTarget = (shears >= 0 ? 5 : 9) + rnd.nextInt(4);
-            } else {
-                context.cobwebBreakTarget = 30 + rnd.nextInt(10);
             }
+            // Vanilla's own mining time for what we're holding (shears or a
+            // sword are quick; bare hands take ages - as they do for you).
+            int ticks = VanillaWorld.breakTicks(context, breakLoc);
+            context.cobwebBreakTarget = ticks > 0 ? ticks : 400;
         }
 
         lookAtBlock(botPlayer, breakLoc);
@@ -1171,12 +1155,8 @@ public class CombatController {
         }
         if (context.cobwebDefenseBreakTicks >= context.cobwebBreakTarget) {
             clearWebStage();
-            try {
-                breakLoc.getWorld().playSound(breakLoc.getLocation().add(0.5, 0.5, 0.5),
-                        org.bukkit.Sound.BLOCK_WOOL_BREAK, 1.0f, 1.0f);
-            } catch (Throwable ignored) {
-            }
-            breakLoc.setType(Material.AIR);
+            // Broken for real: string with a sword, the web with shears.
+            VanillaWorld.breakBlock(context, breakLoc);
             context.cobwebDefenseBreakTicks = 0;
             context.cobwebBreaking = null;
         }
@@ -1209,16 +1189,11 @@ public class CombatController {
         if (context.placedWaterLoc != null) {
             Block waterBlock = context.placedWaterLoc.getBlock();
             if (waterBlock.getType() == Material.WATER) {
-                waterBlock.setType(Material.AIR);
-
-                PlayerInventory inv = botPlayer.getInventory();
-                for (int i = 0; i < 9; i++) {
-                    ItemStack it = inv.getItem(i);
-                    if (it != null && it.getType() == Material.BUCKET) {
-                        inv.setItem(i, new ItemStack(Material.WATER_BUCKET));
-                        context.packetBroadcaster.broadcastEquipment();
-                        break;
-                    }
+                // Scoop it back up with the empty bucket, a real right click
+                // on the source.
+                int bucket = context.inventoryController.findItemSlot(botPlayer, Material.BUCKET);
+                if (bucket >= 0 && bucket <= 8) {
+                    VanillaWorld.useBucketOn(context, botPlayer, bucket, waterBlock);
                 }
             }
             context.placedWaterLoc = null;

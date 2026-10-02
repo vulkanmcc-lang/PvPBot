@@ -127,31 +127,20 @@ public class LavaStuntController {
     }
 
     private boolean placeOverLava(Player botPlayer, ServerPlayer handle, Block target, int slot) {
+        if (slot > 8) {
+            ItemStack wanted = botPlayer.getInventory().getItem(slot);
+            if (wanted == null) return false;
+            Material type = wanted.getType();
+            slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == type);
+        }
+        if (slot < 0 || slot > 8) return false;
         ItemStack item = botPlayer.getInventory().getItem(slot);
         if (item == null || item.getAmount() <= 0) return false;
         if (!InventoryController.isPlaceableBlock(item)) return false;
 
-        Material mat = item.getType();
-        org.bukkit.block.BlockState replaced = target.getState();
-        target.setType(mat, true);
-
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        target, replaced, target, item.clone(),
-                        botPlayer, true, org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled() || !event.canBuild()) {
-            replaced.update(true, false);
-            return false;
-        }
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        item.setAmount(item.getAmount() - 1);
-        botPlayer.getInventory().setItem(slot, item.getAmount() > 0 ? item : null);
-        context.packetBroadcaster.broadcastEquipment();
-        return true;
+        // A real right click on whatever's solid next to / under the lava
+        // (vanilla won't place onto lava itself).
+        return VanillaWorld.place(context, botPlayer, slot, target, null, null);
     }
 
     private void finish() {

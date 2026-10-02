@@ -74,51 +74,40 @@ public class ClutchController {
 
         int floorY = (int) Math.floor(loc.getY() - drop);
 
-        if (tryWaterClutch(botPlayer, handle, w, loc, floorY)) return true;
+        int water = tryWaterClutch(botPlayer, handle, w, loc, floorY);
+        if (water > 0) return true;
+        // The floor isn't in bucket reach yet: keep falling toward it while
+        // there's still another tick before we hit it.
+        if (water == 0 && drop > Math.abs(vel.y) + 0.5) return true;
         return tryWindClutch(botPlayer, handle);
     }
 
-    private boolean tryWaterClutch(Player botPlayer, ServerPlayer handle,
-                                   World w, Location loc, int floorY) {
-        if (w.getEnvironment() == World.Environment.NETHER) return false;
+    // 1 = water's down, 0 = not in reach of the floor yet, -1 = can't.
+    private int tryWaterClutch(Player botPlayer, ServerPlayer handle,
+                               World w, Location loc, int floorY) {
+        if (w.getEnvironment() == World.Environment.NETHER) return -1;
 
         int slot = context.inventoryController.findItemSlot(botPlayer, Material.WATER_BUCKET);
-        if (slot < 0 || slot > 8) return false;
+        if (slot < 0 || slot > 8) return -1;
 
         Block target = w.getBlockAt(loc.getBlockX(), floorY + 1, loc.getBlockZ());
-        if (!target.getType().isAir()) return false;
+        if (!target.getType().isAir()) return -1;
 
         Block support = w.getBlockAt(loc.getBlockX(), floorY, loc.getBlockZ());
-        if (support.getType().isAir()) return false;
+        if (support.getType().isAir()) return -1;
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        aimStraightDown(handle);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        org.bukkit.block.BlockState replaced = target.getState();
-        target.setType(Material.WATER, true);
-
-        ItemStack bucket = botPlayer.getInventory().getItem(slot);
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        target, replaced, support,
-                        bucket != null ? bucket.clone() : new ItemStack(Material.WATER_BUCKET),
-                        botPlayer, true, org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
-            replaced.update(true, false);
+        // The MLG: look down at the floor and right click the bucket - only
+        // once the floor is within reach, like for a player.
+        if (!VanillaWorld.inReach(handle, support, org.bukkit.block.BlockFace.UP)) return 0;
+        if (!VanillaWorld.pourInto(context, botPlayer, slot, target)) {
             clutchCooldown = CLUTCH_COOLDOWN;
-
-            return tryWindClutch(botPlayer, handle);
+            return -1;
         }
 
-        botPlayer.getInventory().setItem(slot, new ItemStack(Material.BUCKET));
         placedWater = target.getLocation();
         waterLingerTicks = 0;
         clutchCooldown = CLUTCH_COOLDOWN;
-        context.packetBroadcaster.broadcastEquipment();
-        return true;
+        return 1;
     }
 
     private boolean tryWindClutch(Player botPlayer, ServerPlayer handle) {
@@ -149,10 +138,6 @@ public class ClutchController {
         context.wallBumpTicks = 0;
         context.avoidTicks = 0;
         hopCooldown = HOP_COOLDOWN;
-    }
-
-    private void aimStraightDown(ServerPlayer handle) {
-        VanillaUse.face(context, handle, handle.getYRot(), 90.0f);
     }
 
     private boolean launchWindCharge(Player botPlayer, int slot, ServerPlayer handle) {
@@ -191,28 +176,20 @@ public class ClutchController {
         removeWater(botPlayer, true);
     }
 
+    // Scoop the clutch water back up with the empty bucket (a real right
+    // click on the source, in reach). Out of reach, or told not to, it just
+    // stays where it is - as a player's would.
     private void removeWater(Player botPlayer, boolean refillBucket) {
         Location at = placedWater;
         placedWater = null;
         waterLingerTicks = 0;
-        if (at == null || at.getWorld() == null) return;
+        if (!refillBucket || at == null || at.getWorld() == null || botPlayer == null) return;
 
         Block b = at.getWorld().getBlockAt(at);
         if (b.getType() != Material.WATER) return;
 
-        org.bukkit.event.block.BlockBreakEvent event =
-                new org.bukkit.event.block.BlockBreakEvent(b, botPlayer);
-        event.setDropItems(false);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) return;
-
-        b.setType(Material.AIR, true);
-
-        if (refillBucket && botPlayer != null) {
-            int bucketSlot = context.inventoryController.findItemSlot(botPlayer, Material.BUCKET);
-            if (bucketSlot >= 0) {
-                botPlayer.getInventory().setItem(bucketSlot, new ItemStack(Material.WATER_BUCKET));
-            }
-        }
+        int bucketSlot = context.inventoryController.findItemSlot(botPlayer, Material.BUCKET);
+        if (bucketSlot < 0 || bucketSlot > 8) return;
+        VanillaWorld.useBucketOn(context, botPlayer, bucketSlot, b);
     }
 }

@@ -391,7 +391,7 @@ public class InventoryController {
         boolean consuming = context.eating || context.drinkingPotionTimer > 0;
 
         if (botPlayer.hasCooldown(Material.SHIELD)) {
-            if (!consuming && handle.isUsingItem()) {
+            if (!consuming && usingShield(handle)) {
                 handle.stopUsingItem();
                 context.packetBroadcaster.broadcastEntityData();
             }
@@ -402,7 +402,7 @@ public class InventoryController {
         boolean shieldOnCooldown = shieldDisabled(botPlayer);
         boolean hasShield = holdsShield(botPlayer) && !shieldOnCooldown;
         if (!hasShield) {
-            if (!consuming && handle.isUsingItem()) handle.stopUsingItem();
+            if (!consuming && usingShield(handle)) handle.stopUsingItem();
             return;
         }
 
@@ -447,7 +447,7 @@ public class InventoryController {
                 return;
             }
             context.shieldReactDelay = -1;
-            if (!consuming && handle.isUsingItem()) {
+            if (!consuming && usingShield(handle)) {
                 handle.stopUsingItem();
                 context.packetBroadcaster.broadcastEntityData();
             }
@@ -480,11 +480,18 @@ public class InventoryController {
             raiseShield(handle);
         } else {
             context.shieldReactDelay = -1;
-            if (!consuming && handle.isUsingItem()) {
+            if (!consuming && usingShield(handle)) {
                 handle.stopUsingItem();
                 context.packetBroadcaster.broadcastEntityData();
             }
         }
+    }
+
+    // Only ever lower the shield itself - a bow being drawn, a crossbow
+    // charging or food being eaten is somebody else's business.
+    private static boolean usingShield(net.minecraft.server.level.ServerPlayer handle) {
+        return handle.isUsingItem()
+                && handle.getUseItem().has(net.minecraft.core.component.DataComponents.BLOCKS_ATTACKS);
     }
 
     // Shield up, but only after the bot's reaction time has passed since it

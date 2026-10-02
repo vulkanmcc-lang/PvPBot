@@ -270,12 +270,8 @@ public class FarmController {
         workTicksElapsed = 0;
 
         Material cropType = block.getType();
-        BlockBreakEvent event = new BlockBreakEvent(block, botPlayer);
-        Bukkit.getPluginManager().callEvent(event);
-        if (!event.isCancelled()) {
-            block.breakNaturally(botPlayer.getInventory().getItemInMainHand());
-            harvested++;
-        }
+        // Broken for real: the crop's own drops, the break event.
+        if (VanillaWorld.breakBlock(context, block)) harvested++;
 
         intendedSeed = CROP_TO_SEED.get(cropType);
         phase = Phase.PLANT;
@@ -311,28 +307,18 @@ public class FarmController {
         context.forwardInput = 0f;
         context.strafeInput = 0f;
 
-        int held = botPlayer.getInventory().getHeldItemSlot();
-        if (held != slot) {
-            botPlayer.getInventory().setHeldItemSlot(slot);
+        if (slot > 8) {
+            Material seed = intendedSeed;
+            slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == seed);
         }
-
-        BlockState replaced = block.getState();
-        block.setBlockData(cropOut.createBlockData(), false);
-
-        BlockPlaceEvent event = new BlockPlaceEvent(block, replaced, below,
-                botPlayer.getInventory().getItemInMainHand(), botPlayer, true, EquipmentSlot.HAND);
-        Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled() || !event.canBuild()) {
-            replaced.update(true, false);
+        // Planted with a real right click of the seeds on the farmland's top.
+        if (slot < 0 || slot > 8
+                || !VanillaWorld.useOn(context, botPlayer, slot, below, BlockFace.UP)) {
             workLoc = null;
             phase = Phase.WAIT;
             waitTicks = 0;
             return true;
         }
-
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        removeOne(botPlayer, slot);
         planted++;
 
         workLoc = null;
@@ -525,18 +511,6 @@ public class FarmController {
 
     private int findSlot(Player p, Material want) {
         return context.inventoryController.ensureInHotbar(p, it -> it.getType() == want);
-    }
-
-    private void removeOne(Player p, int slot) {
-        ItemStack s = p.getInventory().getItem(slot);
-        if (s == null) return;
-        if (s.getAmount() <= 1) {
-            p.getInventory().setItem(slot, null);
-        } else {
-            s.setAmount(s.getAmount() - 1);
-            p.getInventory().setItem(slot, s);
-        }
-        p.updateInventory();
     }
 
     private void lookAtWork(Player botPlayer) {

@@ -512,7 +512,9 @@ public class BuildController {
     }
 
     private void jumpAndPlace(Player botPlayer, ServerPlayer handle, Block target) {
-        if (handle.getY() >= task.y + 0.9) {
+        // Vanilla won't place into a cell the bot is still in: wait until
+        // the jump has carried the feet clear of it.
+        if (handle.getY() >= task.y + 1.0 && !task.hasPartner()) {
             placeBlock(botPlayer, handle, target);
             return;
         }
@@ -521,7 +523,9 @@ public class BuildController {
         // low ceiling (or a refused jump) step off the cell instead and place
         // it from beside - no 3-high space needed.
         int feetY = (int) Math.floor(handle.getY() + 1.0e-3);
-        boolean lowCeiling = job.world.getBlockAt((int) Math.floor(handle.getX()), feetY + 2,
+        // A two-tall door/plant can't go in under us at all - step aside.
+        boolean lowCeiling = task.hasPartner()
+                || job.world.getBlockAt((int) Math.floor(handle.getX()), feetY + 2,
                 (int) Math.floor(handle.getZ())).getType().isSolid();
         if (lowCeiling || !context.movementController.requestJump()) {
             double ax = handle.getX() - (task.x + 0.5), az = handle.getZ() - (task.z + 0.5);
@@ -703,8 +707,8 @@ public class BuildController {
     private static final int BREAK_DONE = 1;
     private static final int BREAK_CANCELLED = -1;
 
-    // One tick of mining `block` with the right tool, crack animation and a
-    // proper BlockBreakEvent at the end (so protection plugins still apply).
+    // One tick of mining `block` with the right tool and crack animation,
+    // broken for real at the end (so protection plugins still apply).
     private int breakStep(Player botPlayer, ServerPlayer handle, Block block) {
         if (breaking == null || !breaking.equals(block)) {
             clearDestroyStage();
@@ -727,12 +731,9 @@ public class BuildController {
         clearDestroyStage();
         breaking = null;
 
-        org.bukkit.event.block.BlockBreakEvent event =
-                new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) return BREAK_CANCELLED;
-
-        block.setType(Material.AIR, true);
+        // Vanilla finishes the break: the BlockBreakEvent, the drops, tool
+        // durability.
+        if (!VanillaWorld.breakBlock(context, block)) return BREAK_CANCELLED;
         return BREAK_DONE;
     }
 
@@ -773,42 +774,46 @@ public class BuildController {
             return;
         }
 
-        org.bukkit.block.BlockState replaced = target.getState();
-        Block other = task.hasPartner() ? partner(target, task) : null;
-        org.bukkit.block.BlockState otherReplaced = other != null ? other.getState() : null;
-
-        // Both halves of a bed/door/tall plant in the same tick, without
-        // physics in between - a lone half would pop off immediately.
-        if (other != null) other.setBlockData(task.partnerData, false);
-        target.setBlockData(task.data, false);
-
-        ItemStack held = botPlayer.getInventory().getItem(slot);
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        target, replaced,
-                        support != null ? support : target,
-                        held != null ? held.clone() : new ItemStack(task.item),
-                        botPlayer, true, org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled()) {
-            replaced.update(true, false);
-            if (otherReplaced != null) otherReplaced.update(true, false);
-
-            job.complete(task);
+        // A real right click on the support's face. Beds and doors take
+        // their facing from where the player looks, so face that way for
+        // them; vanilla then puts down both halves itself.
+        Float yaw = null;
+        if (task.hasPartner() && task.data instanceof org.bukkit.block.data.Directional dir) {
+            yaw = VanillaWorld.yawOf(dir.getFacing());
+        }
+        if (!VanillaWorld.place(context, botPlayer, slot, target, support, task.data, yaw)) {
+            // Refused (someone standing in it, protection, nothing to click
+            // in reach): try another part, and give up on this one after a
+            // few tries so a protected cell can't hold the build forever.
+            if (task == lastFailedPlace) placeFailures++;
+            else {
+                lastFailedPlace = task;
+                placeFailures = 1;
+            }
+            if (placeFailures >= MAX_PLACE_FAILURES) {
+                job.complete(task);
+                lastFailedPlace = null;
+                placeFailures = 0;
+            } else {
+                job.release(task);
+                avoidTask = task;
+                avoidTicksLeft = 60;
+            }
             task = null;
             phase = Phase.IDLE;
+            blockedCooldown = 10;
             return;
         }
-
-        consumeOne(botPlayer, slot);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        try {
-            job.world.playSound(target.getLocation(),
-                    target.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
-        } catch (Throwable ignored) {
+        if (task.hasPartner()) {
+            // Make sure the other half is exactly the schematic's (hinge
+            // side, bed colour already match the item).
+            Block other = partner(target, task);
+            if (other.getType() == task.partnerData.getMaterial() && !other.getBlockData().matches(task.partnerData)) {
+                other.setBlockData(task.partnerData, false);
+            }
         }
+        lastFailedPlace = null;
+        placeFailures = 0;
 
         job.complete(task);
         task = null;
@@ -816,6 +821,10 @@ public class BuildController {
 
         placeDelay = 5;
     }
+
+    private static final int MAX_PLACE_FAILURES = 4;
+    private BuildJob.Task lastFailedPlace = null;
+    private int placeFailures = 0;
 
     // =====================================================================
     // Scaffold planning & execution
@@ -971,7 +980,7 @@ public class BuildController {
                     if (pillarPlaceDelay <= 0) context.movementController.requestJump();
                     return;
                 }
-                if (!onGround && handle.getY() >= st.y() - 0.05
+                if (!onGround && handle.getY() >= st.y()
                         && fx == st.x() && fz == st.z()
                         && (under.getType().isAir() || isReplaceable(under.getType()))) {
                     if (!placeScaffold(botPlayer, handle, under, true, st.x(), st.y(), st.z())) {
@@ -1036,33 +1045,13 @@ public class BuildController {
                     botPlayer, it -> it.getType() == job.scaffoldMaterial());
         }
         if (slot < 0 || slot > 8) return false;
-        botPlayer.getInventory().setHeldItemSlot(slot);
         ItemStack held = botPlayer.getInventory().getItem(slot);
         if (held == null) return false;
 
-        org.bukkit.block.BlockState replaced = cell.getState();
         Block against = pillar ? cell.getRelative(0, -1, 0)
                 : job.world.getBlockAt(standX, standY - 1, standZ);
-        cell.setType(job.scaffoldMaterial(), true);
-
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        cell, replaced, against, held.clone(), botPlayer, true,
-                        org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
-            replaced.update(true, false);
-            return false;
-        }
-
-        consumeOne(botPlayer, slot);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        try {
-            job.world.playSound(cell.getLocation(),
-                    cell.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
-        } catch (Throwable ignored) {
-        }
+        // A real right click on the face we're standing against.
+        if (!VanillaWorld.place(context, botPlayer, slot, cell, against, null)) return false;
         job.addScaffold(cell.getX(), cell.getY(), cell.getZ(), job.scaffoldMaterial(),
                 context.bot.getUUID(), pillar, standX, standY, standZ);
         return true;
@@ -1331,14 +1320,6 @@ public class BuildController {
                 || m == Material.DEAD_BUSH || m == Material.VINE;
     }
 
-    private void consumeOne(Player botPlayer, int slot) {
-        ItemStack s = botPlayer.getInventory().getItem(slot);
-        if (s == null) return;
-        int left = s.getAmount() - 1;
-        botPlayer.getInventory().setItem(slot, left > 0 ? withAmount(s, left) : null);
-        context.packetBroadcaster.broadcastEquipment();
-    }
-
     private static ItemStack withAmount(ItemStack s, int n) {
         s.setAmount(n);
         return s;
@@ -1371,57 +1352,11 @@ public class BuildController {
     private static final int MIN_BREAK_TICKS = 6;
 
     private int computeBreakTicks(Player botPlayer, Block block) {
-        double hardness;
-        try {
-            hardness = block.getType().getHardness();
-        } catch (Throwable t) {
-            hardness = 1.5;
-        }
-        if (hardness < 0) return 200;
-        if (hardness == 0) return MIN_BREAK_TICKS;
-
-        double speed = 1.0;
-        ItemStack hand = botPlayer.getInventory().getItemInMainHand();
-        boolean preferred = false;
-        if (hand != null && !hand.getType().isAir()) {
-            try {
-                preferred = block.isPreferredTool(hand);
-            } catch (Throwable ignored) {
-            }
-            String n = hand.getType().name();
-            if (preferred) {
-                if (n.startsWith("WOODEN")) speed = 2.0;
-                else if (n.startsWith("STONE")) speed = 4.0;
-                else if (n.startsWith("IRON")) speed = 6.0;
-                else if (n.startsWith("DIAMOND")) speed = 8.0;
-                else if (n.startsWith("NETHERITE")) speed = 9.0;
-                else if (n.startsWith("GOLDEN")) speed = 12.0;
-                else if (n.equals("SHEARS")) speed = 2.0;
-            }
-            try {
-                int eff = hand.getEnchantmentLevel(Enchantment.EFFICIENCY);
-                if (eff > 0 && speed > 1.0) speed += eff * eff + 1;
-            } catch (Throwable ignored) {
-            }
-        }
-
-        try {
-            var haste = botPlayer.getPotionEffect(PotionEffectType.HASTE);
-            if (haste != null) speed *= 1.0 + 0.2 * (haste.getAmplifier() + 1);
-        } catch (Throwable ignored) {
-        }
-        if (!botPlayer.isOnGround()) speed /= 5.0;
-        if (botPlayer.isInWater()) speed /= 5.0;
-
-        boolean needsTool;
-        try {
-            needsTool = block.getBlockData().requiresCorrectToolForDrops();
-        } catch (Throwable t) {
-            needsTool = false;
-        }
-        double divisor = (!needsTool || preferred) ? 30.0 : 100.0;
-        int ticks = (int) Math.ceil(divisor * hardness / Math.max(0.01, speed));
-        return Math.max(MIN_BREAK_TICKS, Math.min(ticks, 200));
+        // Vanilla's own mining time for what's in hand right now (tool,
+        // wrong-tool penalty, Efficiency, Haste / Mining Fatigue, in water,
+        // off the ground).
+        int ticks = VanillaWorld.breakTicks(context, block);
+        return ticks < 0 ? 200 : ticks;
     }
 
     private void sendDestroyStage(Block block, int stage) {

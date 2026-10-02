@@ -13,7 +13,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.entity.TNTPrimed;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
-import org.bukkit.inventory.meta.Damageable;
 
 import java.util.List;
 
@@ -365,40 +364,11 @@ public class ExcavationController {
     // underwater penalties, wrong-tool penalty), with a floor so nothing
     // pops instantly - a bot swinging a god pickaxe still visibly mines.
     private int breakTicksFor(Player p, Block b) {
-        float hardness;
-        try {
-            hardness = b.getType().getHardness();
-        } catch (Throwable t) {
-            hardness = 1.5f;
-        }
-        if (hardness < 0) return 600;
-        if (hardness == 0) return 2;
-
-        ItemStack tool = p.getInventory().getItemInMainHand();
-        boolean preferred = tool != null && !tool.getType().isAir() && b.isPreferredTool(tool);
-        double speed = 1.0;
-        if (preferred) {
-            speed = toolSpeed(tool.getType());
-            int eff = tool.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.EFFICIENCY);
-            if (eff > 0 && speed > 1.0) speed += eff * eff + 1;
-        }
-        var haste = p.getPotionEffect(org.bukkit.potion.PotionEffectType.HASTE);
-        if (haste != null) speed *= 1.0 + 0.2 * (haste.getAmplifier() + 1);
-        var fatigue = p.getPotionEffect(org.bukkit.potion.PotionEffectType.MINING_FATIGUE);
-        if (fatigue != null) speed *= Math.pow(0.3, Math.min(4, fatigue.getAmplifier() + 1));
-        if (p.isInWater()) speed /= 5.0;
-        if (!p.isOnGround()) speed /= 5.0;
-
-        boolean needsTool;
-        try {
-            needsTool = b.getBlockData().requiresCorrectToolForDrops();
-        } catch (Throwable t) {
-            needsTool = false;
-        }
-        boolean canHarvest = !needsTool || preferred;
-        double perTick = speed / hardness / (canHarvest ? 30.0 : 100.0);
-        int ticks = (int) Math.ceil(1.0 / Math.max(perTick, 1.0e-4));
-        return Math.max(MIN_BREAK_TICKS, Math.min(ticks, 600));
+        // Vanilla's own mining time for what's in hand right now (tool,
+        // wrong-tool penalty, Efficiency, Haste / Mining Fatigue, in water,
+        // off the ground).
+        int ticks = VanillaWorld.breakTicks(context, b);
+        return ticks < 0 ? 600 : ticks;
     }
 
     private static double toolSpeed(Material m) {
@@ -578,31 +548,8 @@ public class ExcavationController {
         breaking = null;
         breakProgress = 0f;
 
-        boolean ok = false;
-        try {
-            // Real survival break: events, protection plugins, drops, tool wear.
-            ok = botPlayer.breakBlock(block);
-        } catch (Throwable ignored) {
-        }
-        if (!ok && ExcavationJob.breakable(block.getType())) {
-            // breakBlock can refuse for fake players (game-mode / reach
-            // checks); do it the plugin way, still respecting protection.
-            org.bukkit.event.block.BlockBreakEvent ev = new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
-            org.bukkit.Bukkit.getPluginManager().callEvent(ev);
-            if (!ev.isCancelled()) {
-                try {
-                    job.world.playSound(block.getLocation(),
-                            block.getBlockData().getSoundGroup().getBreakSound(), 1.0f, 1.0f);
-                } catch (Throwable ignored) {
-                }
-                if (ev.isDropItems()) {
-                    ok = block.breakNaturally(botPlayer.getInventory().getItemInMainHand());
-                } else {
-                    block.setType(Material.AIR);
-                    ok = true;
-                }
-            }
-        }
+        // Real survival break: events, protection plugins, drops, tool wear.
+        boolean ok = VanillaWorld.breakBlock(context, block);
 
         if (!ok && ExcavationJob.breakable(block.getType())) return -1;
         return 1;
@@ -732,12 +679,7 @@ public class ExcavationController {
             slot = sealSlot(botPlayer);
         }
         if (slot < 0 || slot > 8) return false;
-        Material mat = botPlayer.getInventory().getItem(slot).getType();
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-        lookAt(botPlayer, at.getLocation().add(0.5, 0.5, 0.5));
 
-        org.bukkit.block.BlockState replaced = at.getState();
         Block against = at.getRelative(org.bukkit.block.BlockFace.DOWN);
         for (org.bukkit.block.BlockFace f : FLOOD_FACES) {
             Block o = at.getRelative(f.getOppositeFace());
@@ -746,23 +688,8 @@ public class ExcavationController {
                 break;
             }
         }
-        at.setType(mat, true);
-        org.bukkit.event.block.BlockPlaceEvent place = new org.bukkit.event.block.BlockPlaceEvent(
-                at, replaced, against, new ItemStack(mat), botPlayer, true,
-                org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(place);
-        if (place.isCancelled()) {
-            replaced.update(true, true);
-            return false;
-        }
-        consumeOne(botPlayer, slot);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        try {
-            job.world.playSound(at.getLocation().add(0.5, 0.5, 0.5),
-                    at.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 0.8f);
-        } catch (Throwable ignored) {
-        }
+        // A real right click on a solid face next to the water.
+        if (!VanillaWorld.place(context, botPlayer, slot, at, against, null)) return false;
         job.markSealed(at.getX(), at.getY(), at.getZ());
         wet = true;
         pauseTicks = Math.max(pauseTicks, 2);
@@ -987,56 +914,38 @@ public class ExcavationController {
             return;
         }
 
-        // Place the TNT (a real place event, so protection still applies)...
+        // Place the TNT and light it with the flint and steel, both as real
+        // right clicks: vanilla primes it (80-tick fuse, the bot as its
+        // source) and wears the flint and steel.
         int tntSlot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == Material.TNT);
         if (tntSlot < 0 || tntSlot > 8) return;
-        botPlayer.getInventory().setHeldItemSlot(tntSlot);
-        context.packetBroadcaster.broadcastEquipment();
-        org.bukkit.block.BlockState replaced = spot.getState();
-        spot.setType(Material.TNT, false);
-        org.bukkit.event.block.BlockPlaceEvent place = new org.bukkit.event.block.BlockPlaceEvent(
-                spot, replaced, spot.getRelative(0, -1, 0), new ItemStack(Material.TNT), botPlayer, true,
-                org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(place);
-        if (place.isCancelled()) {
-            replaced.update(true, false);
+        if (!VanillaWorld.place(context, botPlayer, tntSlot, spot, spot.getRelative(0, -1, 0), null)) {
             job.completeBlast(blast, false);
             blast = null;
             phase = Phase.WORK;
             return;
         }
-        consumeOne(botPlayer, tntSlot);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
 
-        // ...then light it with the flint and steel.
         int fsSlot = context.inventoryController.ensureInHotbar(botPlayer,
                 it -> it.getType() == Material.FLINT_AND_STEEL);
-        if (fsSlot >= 0 && fsSlot <= 8) {
-            botPlayer.getInventory().setHeldItemSlot(fsSlot);
-            context.packetBroadcaster.broadcastEquipment();
-        }
-        org.bukkit.event.block.TNTPrimeEvent prime = new org.bukkit.event.block.TNTPrimeEvent(
-                spot, org.bukkit.event.block.TNTPrimeEvent.PrimeCause.PLAYER, botPlayer, null);
-        org.bukkit.Bukkit.getPluginManager().callEvent(prime);
-        if (prime.isCancelled()) {
-            // TNT stays as a block - take it back rather than litter.
-            spot.setType(Material.AIR, false);
-            botPlayer.getInventory().addItem(new ItemStack(Material.TNT));
+        boolean litIt = fsSlot >= 0 && fsSlot <= 8
+                && VanillaWorld.useOn(context, botPlayer, fsSlot, spot, null);
+        if (!litIt || spot.getType() == Material.TNT) {
+            // Couldn't light it - mine the TNT back up rather than litter.
+            if (spot.getType() == Material.TNT) VanillaWorld.breakBlock(context, spot);
             job.completeBlast(blast, false);
             blast = null;
             phase = Phase.WORK;
             return;
         }
-        spot.setType(Material.AIR, false);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        job.world.playSound(center, Sound.ITEM_FLINTANDSTEEL_USE, 1.0f, 1.0f);
-        lit = job.world.spawn(spot.getLocation().add(0.5, 0.0, 0.5), TNTPrimed.class, t -> {
-            t.setFuseTicks(FUSE_TICKS);
-            t.setSource(botPlayer);
-        });
-        wearFlintAndSteel(botPlayer);
+        lit = null;
+        for (org.bukkit.entity.Entity e : job.world.getNearbyEntities(
+                spot.getLocation().add(0.5, 0.5, 0.5), 1.5, 1.5, 1.5)) {
+            if (e instanceof TNTPrimed t) {
+                lit = t;
+                break;
+            }
+        }
 
         phase = Phase.BLAST_FLEE;
         fleeTicks = 0;
@@ -1072,30 +981,6 @@ public class ExcavationController {
             phase = Phase.WORK;
             blastCooldown = 10;
         }
-    }
-
-    private void wearFlintAndSteel(Player p) {
-        PlayerInventory inv = p.getInventory();
-        ItemStack fs = inv.getItemInMainHand();
-        if (fs.getType() != Material.FLINT_AND_STEEL) return;
-        if (fs.getItemMeta() instanceof Damageable dmg) {
-            int next = dmg.getDamage() + 1;
-            if (next >= Material.FLINT_AND_STEEL.getMaxDurability()) {
-                inv.setItemInMainHand(null);
-            } else {
-                dmg.setDamage(next);
-                fs.setItemMeta(dmg);
-            }
-        }
-        context.packetBroadcaster.broadcastEquipment();
-    }
-
-    private void consumeOne(Player p, int slot) {
-        ItemStack s = p.getInventory().getItem(slot);
-        if (s == null) return;
-        if (s.getAmount() <= 1) p.getInventory().setItem(slot, null);
-        else s.setAmount(s.getAmount() - 1);
-        context.packetBroadcaster.broadcastEquipment();
     }
 
     // =====================================================================

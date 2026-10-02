@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.Map;
 
 public class RestockController {
-    public enum Phase { IDLE, PLACE, OPEN, LOOT, EQUIP_PICK, MINE, FINISH }
+    public enum Phase { IDLE, PLACE, OPEN, LOOT, EQUIP_PICK, MINE, COLLECT, FINISH }
 
     public record Need(Material material, int low, int desired) {
     }
@@ -240,15 +240,8 @@ public class RestockController {
             return false;
         }
         shulkerType = box.getType();
-
-        ItemStack single = box.clone();
-        single.setAmount(1);
-        if (box.getAmount() > 1) {
-            box.setAmount(box.getAmount() - 1);
-        } else {
-            inv.setItem(shulkerSlot, null);
-        }
-        heldBox = single;
+        // The box stays in the inventory until it's actually placed.
+        heldBox = null;
 
         shulkerLoc = spot.getLocation();
         previousHeldSlot = inv.getHeldItemSlot();
@@ -320,14 +313,20 @@ public class RestockController {
                 sendDestroyStage(b, (breakTicksElapsed * 10) / Math.max(1, breakTicksTotal));
 
                 if (breakTicksElapsed >= breakTicksTotal) {
-                    breakBox(botPlayer, b);
-                    phase = Phase.FINISH;
+                    clearDestroyStage();
+                    // Mined for real: the box drops as itself with what's
+                    // left in it; walk over it to pick it back up.
+                    phase = VanillaWorld.breakBlock(context, b) ? Phase.COLLECT : Phase.FINISH;
+                    timer = 0;
                 }
+            }
+
+            case COLLECT -> {
+                if (collectBox(botPlayer, handle) || ++timer > 80) phase = Phase.FINISH;
             }
 
             case FINISH -> {
                 clearDestroyStage();
-                if (heldBox != null) giveOrDrop(botPlayer, heldBox);
                 heldBox = null;
 
                 if (previousHeldSlot >= 0 && previousHeldSlot <= 8) {
@@ -350,39 +349,39 @@ public class RestockController {
         return true;
     }
 
+    // Put the box down with a real right click (vanilla carries its
+    // contents over from the item).
     private boolean placeBox(Player botPlayer) {
-        if (shulkerLoc == null || heldBox == null) return false;
+        if (shulkerLoc == null || shulkerType == null) return false;
         Block block = shulkerLoc.getBlock();
         if (!block.getType().isAir()) return false;
+        Material type = shulkerType;
+        int slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == type);
+        if (slot < 0 || slot > 8) return false;
+        return VanillaWorld.place(context, botPlayer, slot, block,
+                block.getRelative(org.bukkit.block.BlockFace.DOWN), null);
+    }
 
-        Block support = block.getRelative(org.bukkit.block.BlockFace.DOWN);
-        BlockState replaced = block.getState();
-
-        block.setType(shulkerType, false);
-
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        block, replaced, support, heldBox.clone(), botPlayer, true,
-                        org.bukkit.inventory.EquipmentSlot.HAND);
-        Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled() || !event.canBuild()) {
-            replaced.update(true, false);
-            return false;
+    // True once the dropped box is back in the inventory.
+    private boolean collectBox(Player botPlayer, ServerPlayer handle) {
+        if (shulkerLoc == null || shulkerLoc.getWorld() == null) return true;
+        org.bukkit.entity.Item drop = null;
+        double best = Double.MAX_VALUE;
+        for (org.bukkit.entity.Entity e : shulkerLoc.getWorld().getNearbyEntities(
+                shulkerLoc.clone().add(0.5, 0.5, 0.5), 3.0, 2.0, 3.0)) {
+            if (!(e instanceof org.bukkit.entity.Item it) || !isShulker(it.getItemStack().getType())) continue;
+            double d = it.getLocation().distanceSquared(botPlayer.getLocation());
+            if (d < best) {
+                best = d;
+                drop = it;
+            }
         }
-
-        ShulkerIO.write(block, contentsBackup);
-
-        try {
-            block.getWorld().playSound(shulkerLoc, org.bukkit.Sound.BLOCK_SHULKER_BOX_OPEN, 0.8f, 1.0f);
-        } catch (Throwable ignored) {
-        }
-
-        ServerPlayer handle = context.bot.getHandle();
-        if (handle != null) {
-            handle.swing(InteractionHand.MAIN_HAND, true);
-            context.packetBroadcaster.broadcastAnimation(handle, 0);
-        }
-        return true;
+        if (drop == null) return true;
+        double dx = drop.getLocation().getX() - handle.getX();
+        double dz = drop.getLocation().getZ() - handle.getZ();
+        double d = Math.sqrt(dx * dx + dz * dz);
+        if (d > 0.3) context.movementController.worldDirToInputs(handle, dx / d, dz / d, 0.6f);
+        return false;
     }
 
     private boolean lootOneItem(Player botPlayer) {
@@ -439,78 +438,21 @@ public class RestockController {
         return false;
     }
 
-    private void breakBox(Player botPlayer, Block block) {
-        org.bukkit.event.block.BlockBreakEvent event =
-                new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
-        event.setDropItems(false);
-        Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
-            heldBox = null;
-            return;
-        }
-
-        ItemStack[] finalContents = contentsBackup;
-
-        ItemStack[] fromBlock = ShulkerIO.read(block);
-        if (fromBlock != null) finalContents = fromBlock;
-
-        ItemStack rebuilt = new ItemStack(shulkerType, 1);
-        try {
-            if (rebuilt.getItemMeta() instanceof BlockStateMeta bsm
-                    && bsm.getBlockState() instanceof ShulkerBox sb) {
-                sb.getInventory().setContents(finalContents);
-                bsm.setBlockState(sb);
-                rebuilt.setItemMeta(bsm);
-            }
-        } catch (Throwable ignored) {
-        }
-
-        Material broken = block.getType();
-        block.setType(Material.AIR, false);
-        try {
-            block.getWorld().playEffect(shulkerLoc, Effect.STEP_SOUND, broken);
-        } catch (Throwable ignored) {
-        }
-
-        heldBox = rebuilt;
-        clearDestroyStage();
-    }
-
+    // Called off midway: mine the box back out if it's in reach (it drops
+    // with its contents); otherwise it stays where it is, as a player's would.
     private void reclaim(Player botPlayer) {
-        if (phase == Phase.IDLE && heldBox == null) return;
+        if (phase == Phase.IDLE) return;
 
         clearDestroyStage();
 
         if (shulkerLoc != null) {
             Block block = shulkerLoc.getBlock();
-            if (isShulker(block.getType())) {
-                ItemStack[] finalContents = contentsBackup;
-                try {
-                    BlockState st = block.getState();
-                    if (st instanceof ShulkerBox sb) finalContents = sb.getInventory().getContents();
-                } catch (Throwable ignored) {
-                }
-
-                ItemStack rebuilt = new ItemStack(block.getType(), 1);
-                try {
-                    if (rebuilt.getItemMeta() instanceof BlockStateMeta bsm
-                            && bsm.getBlockState() instanceof ShulkerBox sb) {
-                        sb.getInventory().setContents(finalContents);
-                        bsm.setBlockState(sb);
-                        rebuilt.setItemMeta(bsm);
-                    }
-                } catch (Throwable ignored) {
-                }
-
-                block.setType(Material.AIR, false);
-                heldBox = rebuilt;
+            ServerPlayer h = context.bot.getHandle();
+            if (isShulker(block.getType()) && h != null
+                    && h.getEyePosition().distanceToSqr(block.getX() + 0.5, block.getY() + 0.5, block.getZ() + 0.5)
+                    <= VanillaWorld.REACH * VanillaWorld.REACH) {
+                VanillaWorld.breakBlock(context, block);
             }
-        }
-
-        if (heldBox != null && botPlayer != null) {
-            giveOrDrop(botPlayer, heldBox);
-        } else if (heldBox != null && shulkerLoc != null && shulkerLoc.getWorld() != null) {
-            shulkerLoc.getWorld().dropItemNaturally(shulkerLoc, heldBox);
         }
 
         if (botPlayer != null && previousHeldSlot >= 0 && previousHeldSlot <= 8) {
@@ -547,35 +489,8 @@ public class RestockController {
     }
 
     private int computeBreakTicks(Player botPlayer) {
-        final double hardness = 2.0;
-        double speed = 1.0;
-
-        ItemStack hand = botPlayer.getInventory().getItemInMainHand();
-        if (hand != null) {
-            String n = hand.getType().name();
-            if (n.endsWith("_PICKAXE")) {
-                if (n.startsWith("WOODEN")) speed = 2.0;
-                else if (n.startsWith("STONE")) speed = 4.0;
-                else if (n.startsWith("IRON")) speed = 6.0;
-                else if (n.startsWith("DIAMOND")) speed = 8.0;
-                else if (n.startsWith("NETHERITE")) speed = 9.0;
-                else if (n.startsWith("GOLDEN")) speed = 12.0;
-            }
-            try {
-                int eff = hand.getEnchantmentLevel(Enchantment.EFFICIENCY);
-                if (eff > 0 && speed > 1.0) speed += eff * eff + 1;
-            } catch (Throwable ignored) {
-            }
-        }
-
-        try {
-            var haste = botPlayer.getPotionEffect(PotionEffectType.HASTE);
-            if (haste != null) speed *= 1.0 + 0.2 * (haste.getAmplifier() + 1);
-        } catch (Throwable ignored) {
-        }
-
-        int ticks = (int) Math.ceil(30.0 * hardness / Math.max(0.01, speed));
-        return Math.max(2, Math.min(ticks, 200));
+        int ticks = shulkerLoc == null ? -1 : VanillaWorld.breakTicks(context, shulkerLoc.getBlock());
+        return ticks < 0 ? 40 : ticks;
     }
 
     private void equipPickaxe(Player botPlayer) {

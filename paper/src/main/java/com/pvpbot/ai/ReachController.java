@@ -380,7 +380,7 @@ public class ReachController {
                     if (placeDelay <= 0) context.movementController.requestJump();
                     return;
                 }
-                if (!onGround && handle.getY() >= st.y() - 0.05 && fx == st.x() && fz == st.z()
+                if (!onGround && handle.getY() >= st.y() && fx == st.x() && fz == st.z()
                         && (under.getType().isAir() || !under.getType().isSolid())) {
                     if (!place(botPlayer, handle, under, under.getRelative(0, -1, 0))) {
                         failStep();
@@ -408,31 +408,13 @@ public class ReachController {
             slot = context.inventoryController.findBlockSlot(botPlayer);
             if (slot < 0 || slot > 8) return false;
         }
-        botPlayer.getInventory().setHeldItemSlot(slot);
         ItemStack held = botPlayer.getInventory().getItem(slot);
         if (held == null || !held.getType().isBlock()) return false;
 
-        org.bukkit.block.BlockState replaced = cell.getState();
-        cell.setType(held.getType(), true);
-        org.bukkit.event.block.BlockPlaceEvent ev = new org.bukkit.event.block.BlockPlaceEvent(
-                cell, replaced, against, held.clone(), botPlayer, true,
-                org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(ev);
-        if (ev.isCancelled()) {
-            replaced.update(true, false);
-            return false;
-        }
-        if (held.getAmount() <= 1) botPlayer.getInventory().setItem(slot, null);
-        else held.setAmount(held.getAmount() - 1);
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-        context.packetBroadcaster.broadcastEquipment();
-        try {
-            cell.getWorld().playSound(cell.getLocation(),
-                    cell.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
-        } catch (Throwable ignored) {
-        }
-        return true;
+        // A real right click on the face of `against` (or whatever face is
+        // in reach): vanilla refuses it while the bot is still inside the
+        // cell, so the tower step goes in at the top of the jump.
+        return VanillaWorld.place(context, botPlayer, slot, cell, against, null);
     }
 
     private int countBlocks(Player p) {

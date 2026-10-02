@@ -2807,29 +2807,10 @@ public class MovementController {
         if (!(data instanceof org.bukkit.block.data.Openable op)) return false;
         if (op.isOpen()) return false;
 
-        try {
-            org.bukkit.event.player.PlayerInteractEvent event =
-                    new org.bukkit.event.player.PlayerInteractEvent(
-                            botPlayer, org.bukkit.event.block.Action.RIGHT_CLICK_BLOCK,
-                            botPlayer.getInventory().getItemInMainHand(), b,
-                            org.bukkit.block.BlockFace.UP);
-            org.bukkit.Bukkit.getPluginManager().callEvent(event);
-            if (event.useInteractedBlock() == org.bukkit.event.Event.Result.DENY) return false;
-        } catch (Throwable ignored) {
-            return false;
-        }
-
-        op.setOpen(true);
-        b.setBlockData(op, true);
-
-        try {
-            b.getWorld().playSound(b.getLocation(),
-                    m.name().contains("GATE")
-                            ? org.bukkit.Sound.BLOCK_FENCE_GATE_OPEN
-                            : org.bukkit.Sound.BLOCK_WOODEN_DOOR_OPEN,
-                    1.0f, 1.0f);
-        } catch (Throwable ignored) {
-        }
+        // A real right click on it: vanilla opens it (both halves of a door,
+        // the right sound, the interact event) - or doesn't, if a plugin or
+        // the block says no.
+        if (!VanillaWorld.interact(context, b)) return false;
 
         context.doorCooldown = 20;
         return true;
@@ -3812,6 +3793,16 @@ public class MovementController {
 
         if (support == null || !support.getType().isSolid()) return false;
 
+        // Only hotbar blocks can be placed - a player can't right click with
+        // something in their backpack without opening the inventory first.
+        if (slot > 8) {
+            ItemStack wanted = botPlayer.getInventory().getItem(slot);
+            if (wanted == null) return false;
+            Material wantType = wanted.getType();
+            slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == wantType);
+            if (slot < 0 || slot > 8) return false;
+        }
+
         ItemStack blockItem = botPlayer.getInventory().getItem(slot);
         if (blockItem == null || blockItem.getAmount() <= 0) return false;
 
@@ -3819,51 +3810,21 @@ public class MovementController {
         if (!InventoryController.isPlaceableBlock(blockItem)
                 || GRAVITY_BLOCKS.contains(mat)) return false;
 
-        org.bukkit.block.BlockState replaced = target.getState();
-        org.bukkit.block.BlockFace face = support.getFace(target);
-        if (face == null) face = org.bukkit.block.BlockFace.SELF;
-
-        target.setType(mat, true);
-
+        // Slabs go in as top slabs (a full-height step to walk on), which a
+        // player gets by clicking the upper half of the face.
+        org.bukkit.block.data.BlockData want = null;
         try {
-            org.bukkit.block.data.BlockData bd = target.getBlockData();
-            if (bd instanceof org.bukkit.block.data.type.Slab slab
-                    && slab.getType() == org.bukkit.block.data.type.Slab.Type.BOTTOM) {
+            org.bukkit.block.data.BlockData bd = mat.createBlockData();
+            if (bd instanceof org.bukkit.block.data.type.Slab slab) {
                 slab.setType(org.bukkit.block.data.type.Slab.Type.TOP);
-                target.setBlockData(slab, false);
+                want = slab;
             }
         } catch (Throwable ignored) {
         }
 
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        target, replaced, support, blockItem.clone(),
-                        botPlayer, true, org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled() || !event.canBuild()) {
-            replaced.update(true, false);
-            return false;
-        }
-
-        ItemStack offhandBackup = botPlayer.getInventory().getItemInOffHand().clone();
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-        context.bot.getHandle().swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
-
-        blockItem.setAmount(blockItem.getAmount() - 1);
-        if (blockItem.getAmount() <= 0) botPlayer.getInventory().setItem(slot, null);
-
-        botPlayer.getInventory().setItemInOffHand(offhandBackup);
-        context.packetBroadcaster.broadcastEquipment();
-
-        try {
-            target.getWorld().playSound(target.getLocation().add(0.5, 0.5, 0.5),
-                    mat.createBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
-        } catch (Throwable ignored) {
-        }
-        return true;
+        // A real right click on the support's face (vanilla placement rules,
+        // item use, sound and events).
+        return VanillaWorld.place(context, botPlayer, slot, target, support, want);
     }
 
     private static final java.util.EnumSet<Material> GRAVITY_BLOCKS =

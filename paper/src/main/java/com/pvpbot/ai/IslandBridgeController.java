@@ -445,10 +445,6 @@ public class IslandBridgeController {
             slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == BLOCK);
             if (slot < 0 || slot > 8) return true; // try again next time
         }
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
-        org.bukkit.block.BlockState replaced = at.getState();
         Block against = at.getRelative(org.bukkit.block.BlockFace.DOWN);
         for (org.bukkit.block.BlockFace f : new org.bukkit.block.BlockFace[]{
                 org.bukkit.block.BlockFace.NORTH, org.bukkit.block.BlockFace.SOUTH, org.bukkit.block.BlockFace.EAST,
@@ -459,27 +455,8 @@ public class IslandBridgeController {
                 break;
             }
         }
-        at.setType(BLOCK, true);
-        org.bukkit.event.block.BlockPlaceEvent ev = new org.bukkit.event.block.BlockPlaceEvent(
-                at, replaced, against, new ItemStack(BLOCK), botPlayer, true,
-                org.bukkit.inventory.EquipmentSlot.HAND);
-        Bukkit.getPluginManager().callEvent(ev);
-        if (ev.isCancelled()) {
-            replaced.update(true, false);
-            return false;
-        }
-        ItemStack held = botPlayer.getInventory().getItem(slot);
-        if (held != null) {
-            if (held.getAmount() <= 1) botPlayer.getInventory().setItem(slot, null);
-            else held.setAmount(held.getAmount() - 1);
-        }
-        h.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(h, 0);
-        try {
-            job.world.playSound(at.getLocation().add(0.5, 0.5, 0.5),
-                    at.getBlockData().getSoundGroup().getPlaceSound(), 1.0f, 0.8f);
-        } catch (Throwable ignored) {
-        }
+        // A real right click on the bridge edge we're standing on.
+        if (!VanillaWorld.place(context, botPlayer, slot, at, against, null)) return false;
         placeDelay = PLACE_DELAY + java.util.concurrent.ThreadLocalRandom.current().nextInt(3);
         return true;
     }

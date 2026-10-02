@@ -210,8 +210,13 @@ public class BotAI {
                 }
             }
             if (context.breakingCobwebTimer <= 0) {
-                if (web.getType() == org.bukkit.Material.COBWEB) {
-                    web.setType(org.bukkit.Material.AIR);
+                // Mined out for real if it's still in reach; a web we've
+                // walked away from just stays, as anyone's would.
+                net.minecraft.server.level.ServerPlayer h0 = handle0();
+                if (web.getType() == org.bukkit.Material.COBWEB && h0 != null
+                        && h0.getEyePosition().distanceToSqr(web.getX() + 0.5, web.getY() + 0.5, web.getZ() + 0.5)
+                        <= com.pvpbot.ai.VanillaWorld.REACH * com.pvpbot.ai.VanillaWorld.REACH) {
+                    com.pvpbot.ai.VanillaWorld.breakBlock(context, web);
                 }
                 context.blockToBreak = null;
             }

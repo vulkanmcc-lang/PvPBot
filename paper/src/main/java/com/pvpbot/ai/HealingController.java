@@ -727,22 +727,11 @@ public class HealingController {
         Block below = placeBlock.getRelative(org.bukkit.block.BlockFace.DOWN);
         if (!below.getType().isSolid()) { context.blockPlaceCooldown = 10; return; }
 
-        ItemStack offhandBackup = p.getInventory().getItemInOffHand().clone();
-
-        p.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-        context.bot.getHandle().swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
-
-        ItemStack blockItem = p.getInventory().getItem(slot);
-        if (blockItem != null) {
-            placeBlock.setType(blockItem.getType());
-            blockItem.setAmount(blockItem.getAmount() - 1);
-            if (blockItem.getAmount() <= 0) p.getInventory().setItem(slot, null);
+        // A real right click on the ground in front of us.
+        if (!VanillaWorld.place(context, p, slot, placeBlock, below, null)) {
+            context.blockPlaceCooldown = 10;
+            return;
         }
-
-        p.getInventory().setItemInOffHand(offhandBackup);
-        context.packetBroadcaster.broadcastEquipment();
         context.blockPlaceCooldown = 70 + java.util.concurrent.ThreadLocalRandom.current().nextInt(21);
     }
 

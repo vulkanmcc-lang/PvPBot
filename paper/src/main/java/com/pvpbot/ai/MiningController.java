@@ -51,7 +51,7 @@ public class MiningController {
     private int mined;
     private int foundHere;
 
-    private enum Stash { PLACE, FILL, BREAK }
+    private enum Stash { PLACE, FILL, BREAK, COLLECT }
     private Stash stashStep;
     private Location stashLoc;
     private Material stashType;
@@ -491,11 +491,10 @@ public class MiningController {
         ItemStack[] existing = readShulkerContents(box);
         if (existing == null) return false;
 
+        // The box stays in the inventory until it's actually placed.
         stashBackup = existing;
         stashType = box.getType();
         stashLoc = spot.getLocation();
-        botPlayer.getInventory().setItem(slot, null);
-        botPlayer.updateInventory();
 
         stashStep = Stash.PLACE;
         stashTimer = 4;
@@ -520,12 +519,9 @@ public class MiningController {
             case PLACE -> {
                 if (stashTimer-- > 0) return true;
                 if (!placeStash(botPlayer, block)) {
-                    returnStashItem(botPlayer, buildStashItem(stashBackup));
                     endStash();
                     return true;
                 }
-                handle.swing(InteractionHand.MAIN_HAND, true);
-                context.packetBroadcaster.broadcastAnimation(handle, 0);
                 stashStep = Stash.FILL;
                 stashTimer = 10;
             }
@@ -537,34 +533,25 @@ public class MiningController {
             }
             case BREAK -> {
                 if (!breakStash(botPlayer, handle, block)) return true;
-                endStash();
+                stashStep = Stash.COLLECT;
+                stashTimer = 0;
+            }
+            case COLLECT -> {
+                // Walk over the dropped box to pick it up, like anyone would.
+                if (collectStash(botPlayer, handle) || ++stashTimer > 80) endStash();
             }
         }
         return true;
     }
 
+    // Put the box down with a real right click - vanilla carries its
+    // contents over from the item.
     private boolean placeStash(Player botPlayer, Block block) {
         if (!block.getType().isAir()) return false;
-        BlockState replaced = block.getState();
-        block.setType(stashType, false);
-
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        block, replaced, block.getRelative(org.bukkit.block.BlockFace.DOWN),
-                        buildStashItem(stashBackup), botPlayer, true,
-                        org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled() || !event.canBuild()) {
-            replaced.update(true, false);
-            return false;
-        }
-
-        ShulkerIO.write(block, stashBackup);
-        try {
-            block.getWorld().playSound(stashLoc, org.bukkit.Sound.BLOCK_SHULKER_BOX_OPEN, 0.8f, 1.0f);
-        } catch (Throwable ignored) {
-        }
-        return true;
+        Material type = stashType;
+        int slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == type);
+        if (slot < 0 || slot > 8) return false;
+        return VanillaWorld.place(context, botPlayer, slot, block, null, null);
     }
 
     private void moveTargetsInto(Player botPlayer, Block block) {
@@ -609,68 +596,48 @@ public class MiningController {
         clearDestroyStage();
         breaking = null;
 
-        org.bukkit.event.block.BlockBreakEvent event =
-                new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
+        // Mined for real: a shulker box drops as itself with everything in
+        // it (vanilla), ready to be picked up.
+        if (!VanillaWorld.breakBlock(context, block)) {
             pickNewHeading();
-            return true;
         }
-
-        ItemStack[] finalContents = stashBackup;
-        ItemStack[] fromBlock = ShulkerIO.read(block);
-        if (fromBlock != null) finalContents = fromBlock;
-
-        Material broken = block.getType();
-        block.setType(Material.AIR, false);
-        try {
-            block.getWorld().playEffect(stashLoc, org.bukkit.Effect.STEP_SOUND, broken);
-        } catch (Throwable ignored) {
-        }
-
-        returnStashItem(botPlayer, buildStashItem(finalContents));
         return true;
     }
 
-    private ItemStack buildStashItem(ItemStack[] contents) {
-        ItemStack rebuilt = new ItemStack(stashType == null ? Material.SHULKER_BOX : stashType, 1);
-        try {
-            if (rebuilt.getItemMeta() instanceof org.bukkit.inventory.meta.BlockStateMeta bsm
-                    && bsm.getBlockState() instanceof org.bukkit.block.ShulkerBox sb) {
-                if (contents != null) sb.getInventory().setContents(contents);
-                bsm.setBlockState(sb);
-                rebuilt.setItemMeta(bsm);
+    // True once the dropped box is back in the inventory.
+    private boolean collectStash(Player botPlayer, ServerPlayer handle) {
+        if (stashLoc == null || stashLoc.getWorld() == null) return true;
+        org.bukkit.entity.Item drop = null;
+        double best = Double.MAX_VALUE;
+        for (org.bukkit.entity.Entity e : stashLoc.getWorld().getNearbyEntities(
+                stashLoc.clone().add(0.5, 0.5, 0.5), 3.0, 2.0, 3.0)) {
+            if (!(e instanceof org.bukkit.entity.Item it) || !isShulkerMaterial(it.getItemStack().getType())) continue;
+            double d = it.getLocation().distanceSquared(botPlayer.getLocation());
+            if (d < best) {
+                best = d;
+                drop = it;
             }
-        } catch (Throwable ignored) {
         }
-        return rebuilt;
+        if (drop == null) return true;
+        double dx = drop.getLocation().getX() - handle.getX();
+        double dz = drop.getLocation().getZ() - handle.getZ();
+        double d = Math.sqrt(dx * dx + dz * dz);
+        if (d > 0.3) context.movementController.worldDirToInputs(handle, dx / d, dz / d, 0.6f);
+        return false;
     }
 
-    private void returnStashItem(Player botPlayer, ItemStack item) {
-        if (item == null || botPlayer == null) return;
-        java.util.HashMap<Integer, ItemStack> left = botPlayer.getInventory().addItem(item);
-        for (ItemStack over : left.values()) {
-            botPlayer.getWorld().dropItemNaturally(botPlayer.getLocation(), over);
-        }
-        botPlayer.updateInventory();
-    }
-
+    // Called off mid-stash: mine the box back out if it's still in reach
+    // (it drops with its contents); otherwise it stays put, as a player's
+    // would.
     private void reclaimStash() {
         if (stashLoc == null || stashType == null) return;
-        Player botPlayer = context.bot.getBukkitPlayer();
         try {
             Block block = stashLoc.getBlock();
-            if (isShulkerMaterial(block.getType())) {
-                ItemStack[] finalContents = stashBackup;
-                ItemStack[] fromBlock = ShulkerIO.read(block);
-                if (fromBlock != null) finalContents = fromBlock;
-                ItemStack rebuilt = buildStashItem(finalContents);
-                block.setType(Material.AIR, false);
-                if (botPlayer != null) {
-                    returnStashItem(botPlayer, rebuilt);
-                } else if (stashLoc.getWorld() != null) {
-                    stashLoc.getWorld().dropItemNaturally(stashLoc, rebuilt);
-                }
+            net.minecraft.server.level.ServerPlayer h = context.bot.getHandle();
+            if (isShulkerMaterial(block.getType()) && h != null
+                    && h.getEyePosition().distanceToSqr(block.getX() + 0.5, block.getY() + 0.5, block.getZ() + 0.5)
+                    <= VanillaWorld.REACH * VanillaWorld.REACH) {
+                VanillaWorld.breakBlock(context, block);
             }
         } catch (Throwable ignored) {
         }
@@ -826,15 +793,11 @@ public class MiningController {
         clearDestroyStage();
         breaking = null;
 
-        org.bukkit.event.block.BlockBreakEvent event =
-                new org.bukkit.event.block.BlockBreakEvent(block, botPlayer);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-        if (event.isCancelled()) {
+        // Broken for real: drops (fortune / silk touch), pickaxe wear, events.
+        if (!VanillaWorld.breakBlock(context, block)) {
             pickNewHeading();
             return false;
         }
-
-        block.breakNaturally(botPlayer.getInventory().getItemInMainHand());
         mined++;
         if (job != null) job.noteMined();
         return true;
@@ -948,41 +911,11 @@ public class MiningController {
         p.getInventory().setHeldItemSlot(held);
     }
 
+    // Vanilla's mining time for what's in hand right now (tool, wrong-tool
+    // penalty, Efficiency, Haste, in water, mid-air).
     private int computeBreakTicks(Player botPlayer, Block block) {
-        double hardness;
-        try {
-            hardness = block.getType().getHardness();
-        } catch (Throwable t) {
-            hardness = 1.5;
-        }
-        if (hardness < 0) return 200;
-        if (hardness == 0) return 2;
-
-        double speed = 1.0;
-        ItemStack hand = botPlayer.getInventory().getItemInMainHand();
-        if (hand != null && hand.getType().name().endsWith("_PICKAXE")) {
-            String n = hand.getType().name();
-            if (n.startsWith("WOODEN")) speed = 2.0;
-            else if (n.startsWith("STONE")) speed = 4.0;
-            else if (n.startsWith("IRON")) speed = 6.0;
-            else if (n.startsWith("DIAMOND")) speed = 8.0;
-            else if (n.startsWith("NETHERITE")) speed = 9.0;
-            else if (n.startsWith("GOLDEN")) speed = 12.0;
-            try {
-                int eff = hand.getEnchantmentLevel(Enchantment.EFFICIENCY);
-                if (eff > 0) speed += eff * eff + 1;
-            } catch (Throwable ignored) {
-            }
-        }
-
-        try {
-            var haste = botPlayer.getPotionEffect(PotionEffectType.HASTE);
-            if (haste != null) speed *= 1.0 + 0.2 * (haste.getAmplifier() + 1);
-        } catch (Throwable ignored) {
-        }
-
-        int ticks = (int) Math.ceil(30.0 * hardness / Math.max(0.01, speed));
-        return Math.max(2, Math.min(ticks, 200));
+        int ticks = VanillaWorld.breakTicks(context, block);
+        return ticks < 0 ? 200 : ticks;
     }
 
     private void sendDestroyStage(Block block, int stage) {

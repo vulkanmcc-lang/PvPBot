@@ -215,20 +215,12 @@ public class DeliveryController {
 
         double dist = item.getLocation().distance(botPlayer.getLocation());
 
-        if (dist <= 1.6) {
-            if (botPlayer.getInventory().firstEmpty() == -1 && !freeASlot(botPlayer)) {
-                fail("the bot's inventory is full and nothing could be dropped");
-                return false;
-            }
-
-            ItemStack stack = item.getItemStack();
-            botPlayer.getInventory().addItem(stack);
-            botPlayer.updateInventory();
-            item.remove();
-            droppedItemId = null;
-            beginTravel();
-            return true;
+        if (dist <= 2.5 && botPlayer.getInventory().firstEmpty() == -1 && !freeASlot(botPlayer)) {
+            fail("the bot's inventory is full and nothing could be dropped");
+            return false;
         }
+        // Walk onto it - vanilla picks it up on contact (and the next tick
+        // sees it gone and sets off).
 
         walkTowards(botPlayer, item.getLocation());
         return true;
@@ -389,39 +381,47 @@ public class DeliveryController {
 
         ItemStack parcel = botPlayer.getInventory().getItem(slot);
         if (parcel == null) return;
-        botPlayer.getInventory().setItem(slot, null);
-        botPlayer.updateInventory();
-
         ItemTags.clearCargo(parcel);
+        botPlayer.getInventory().setItem(slot, parcel);
 
+        // Set it down on the floor beside us with a real right click
+        // (vanilla keeps everything inside it)...
+        int hotbar = slot;
+        if (hotbar > 8) {
+            ItemStack want = parcel;
+            hotbar = context.inventoryController.ensureInHotbar(botPlayer, it -> it.isSimilar(want));
+        }
         Location at = botPlayer.getLocation();
-        Block spot = at.getBlock();
-        try {
-            if (spot.getType().isAir()
-                    && spot.getRelative(org.bukkit.block.BlockFace.DOWN).getType().isSolid()) {
-                BlockState replaced = spot.getState();
-                spot.setType(parcel.getType(), false);
-
-                org.bukkit.event.block.BlockPlaceEvent event =
-                        new org.bukkit.event.block.BlockPlaceEvent(
-                                spot, replaced,
-                                spot.getRelative(org.bukkit.block.BlockFace.DOWN),
-                                parcel.clone(), botPlayer, true,
-                                org.bukkit.inventory.EquipmentSlot.HAND);
-                org.bukkit.Bukkit.getPluginManager().callEvent(event);
-
-                if (event.isCancelled() || !event.canBuild()) {
-                    replaced.update(true, false);
-                } else {
-                    ItemStack[] contents = readShulkerContents(parcel);
-                    if (contents != null) ShulkerIO.write(spot, contents);
-                    return;
-                }
+        Block feet = at.getBlock();
+        if (hotbar >= 0 && hotbar <= 8) {
+            for (org.bukkit.block.BlockFace f : new org.bukkit.block.BlockFace[]{
+                    botPlayer.getFacing(), org.bukkit.block.BlockFace.NORTH, org.bukkit.block.BlockFace.SOUTH,
+                    org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.WEST}) {
+                Block spot = feet.getRelative(f);
+                Block below = spot.getRelative(org.bukkit.block.BlockFace.DOWN);
+                if (!spot.getType().isAir() || !below.getType().isSolid()) continue;
+                if (VanillaWorld.place(context, botPlayer, hotbar, spot, below, null)) return;
             }
-        } catch (Throwable ignored) {
         }
 
-        botPlayer.getWorld().dropItemNaturally(at.clone().add(0, 0.5, 0), parcel);
+        // ...or, with nowhere to put it, drop it like pressing Q.
+        int now = findSlotOf(botPlayer, parcel);
+        if (now < 0) return;
+        botPlayer.getInventory().setItem(now, null);
+        try {
+            context.bot.getHandle().drop(
+                    org.bukkit.craftbukkit.inventory.CraftItemStack.asNMSCopy(parcel), false, true);
+        } catch (Throwable t) {
+            botPlayer.getWorld().dropItemNaturally(at.clone().add(0, 0.5, 0), parcel);
+        }
+    }
+
+    private static int findSlotOf(Player p, ItemStack stack) {
+        for (int i = 0; i < p.getInventory().getSize(); i++) {
+            ItemStack s = p.getInventory().getItem(i);
+            if (s != null && s.isSimilar(stack)) return i;
+        }
+        return -1;
     }
 
     private int findCargoSlot(Player p) {

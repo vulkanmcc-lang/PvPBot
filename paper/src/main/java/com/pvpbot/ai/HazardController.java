@@ -165,25 +165,13 @@ public class HazardController {
             return false;
         }
 
-        ServerPlayer handle = context.bot.getHandle();
-        ItemStack offhandBackup = p.getInventory().getItemInOffHand().clone();
         int previousSlot = p.getInventory().getHeldItemSlot();
 
-        context.movementController.lookAt(chosen.getLocation().add(0.5, 0.5, 0.5), 0.0);
-
-        p.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
-
-        ItemStack blockItem = p.getInventory().getItem(slot);
-        if (blockItem != null) {
-            chosen.setType(blockItem.getType());
-            blockItem.setAmount(blockItem.getAmount() - 1);
-            if (blockItem.getAmount() <= 0) p.getInventory().setItem(slot, null);
+        // A real right click against one of its neighbours.
+        if (slot < 0 || slot > 8 || !VanillaWorld.place(context, p, slot, chosen, null, null)) {
+            context.cartBlockCooldown = 10;
+            return false;
         }
-
-        p.getInventory().setItemInOffHand(offhandBackup);
         p.getInventory().setHeldItemSlot(previousSlot);
         context.packetBroadcaster.broadcastEquipment();
 
@@ -325,6 +313,7 @@ public class HazardController {
     private boolean tryCounterMace(Player botPlayer) {
         if (maceCounterCooldown > 0) maceCounterCooldown--;
         if (maceScanCooldown > 0) maceScanCooldown--;
+        if (counterTarget != null) return continueCounterDraw(botPlayer);
 
         if (maceCounterCooldown > 0) return false;
         if (context.eating || context.drinkingPotionTimer > 0 || context.fleeing) return false;
@@ -402,40 +391,61 @@ public class HazardController {
                 || base == org.bukkit.potion.PotionType.LONG_SLOW_FALLING;
     }
 
+    // The counter is a real bow shot: start drawing now, let go once it's
+    // drawn far enough (continueCounterDraw). Vanilla picks the arrow the
+    // way it does for anyone - the slow-falling ones were moved up front
+    // into the hotbar for it.
+    private Player counterTarget = null;
+    private static final int COUNTER_DRAW_TICKS = 12;
+    private static final int COUNTER_MAX_DRAW = 40;
+
     private void shootSlowFallingArrow(Player botPlayer, Player wielder, int bowSlot, int arrowSlot) {
         ServerPlayer handle = context.bot.getHandle();
         if (handle == null) return;
-
         botPlayer.getInventory().setHeldItemSlot(bowSlot);
         context.packetBroadcaster.broadcastEquipment();
+        if (VanillaUse.use(handle, InteractionHand.MAIN_HAND).used()) {
+            context.packetBroadcaster.broadcastEntityData();
+            counterTarget = wielder;
+        }
+    }
+
+    private boolean continueCounterDraw(Player botPlayer) {
+        ServerPlayer handle = context.bot.getHandle();
+        Player wielder = counterTarget;
+        boolean drawing = handle != null && handle.isUsingItem()
+                && handle.getUseItem().getItem() == net.minecraft.world.item.Items.BOW;
+        if (!drawing || wielder == null || !wielder.isValid() || wielder.isDead()
+                || wielder.getWorld() != botPlayer.getWorld() || wielder.isOnGround()
+                || handle.getTicksUsingItem() > COUNTER_MAX_DRAW) {
+            if (drawing) {
+                handle.stopUsingItem();
+                context.packetBroadcaster.broadcastEntityData();
+            }
+            counterTarget = null;
+            return false;
+        }
 
         Location aim = wielder.getLocation().clone().add(0, wielder.getEyeHeight() * 0.6, 0);
-        context.movementController.lookAt(aim, 0.0);
-        context.movementController.flushLook(handle);
-        context.packetBroadcaster.broadcastRotation(handle);
+        Location eye = botPlayer.getEyeLocation();
+        Vector dir = aim.toVector().subtract(eye.toVector());
+        double horiz = Math.sqrt(dir.getX() * dir.getX() + dir.getZ() * dir.getZ());
+        dir.setY(dir.getY() + horiz * 0.12);
+        float yaw = (float) Math.toDegrees(Math.atan2(-dir.getX(), dir.getZ()));
+        float pitch = (float) Math.toDegrees(-Math.atan2(dir.getY(), Math.max(1.0E-4, horiz)));
+        context.requestLook(yaw, pitch, BotAIContext.LOOK_CRITICAL, false);
+        context.forwardInput = 0f;
+        context.strafeInput = 0f;
 
-        handle.swing(InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(handle, 0);
+        if (handle.getTicksUsingItem() < COUNTER_DRAW_TICKS) return true;
 
-        try {
-            org.bukkit.entity.Arrow arrow = botPlayer.launchProjectile(org.bukkit.entity.Arrow.class);
-            Location eye = botPlayer.getEyeLocation();
-            Vector dir = aim.toVector().subtract(eye.toVector());
-            double horiz = Math.sqrt(dir.getX() * dir.getX() + dir.getZ() * dir.getZ());
-            dir.setY(dir.getY() + horiz * 0.12);
-            arrow.setVelocity(dir.normalize().multiply(3.0));
-            arrow.setShooter(botPlayer);
-            arrow.setBasePotionType(org.bukkit.potion.PotionType.SLOW_FALLING);
-        } catch (Throwable ignored) {
-        }
-
-        ItemStack stack = botPlayer.getInventory().getItem(arrowSlot);
-        if (stack != null) {
-            stack.setAmount(stack.getAmount() - 1);
-            botPlayer.getInventory().setItem(arrowSlot, stack.getAmount() > 0 ? stack : null);
-        }
+        VanillaUse.face(context, handle, yaw, pitch);
+        handle.releaseUsingItem();
+        context.packetBroadcaster.broadcastEntityData();
+        counterTarget = null;
         botPlayer.getInventory().setHeldItemSlot(context.inventoryController.findBestWeaponSlot(botPlayer));
         context.packetBroadcaster.broadcastEquipment();
+        return true;
     }
 
     private boolean isFriendly(Player p) {

@@ -231,7 +231,8 @@ public class CartController {
             return true;
         }
 
-        if (++abortTicks > 60) {
+        // Real draws and crossbow charging take time.
+        if (++abortTicks > 160) {
             abort();
             cooldown = 100;
             return false;
@@ -291,9 +292,18 @@ public class CartController {
 
         int slot = findFlameBowSlot(botPlayer);
         if (slot < 0) slot = findSlot(botPlayer, Material.BOW);
-        if (slot >= 0) {
-            botPlayer.getInventory().setHeldItemSlot(slot);
-            context.packetBroadcaster.broadcastEquipment();
+        if (slot < 0 || slot > 8) {
+            abort();
+            cooldown = 60;
+            return false;
+        }
+        botPlayer.getInventory().setHeldItemSlot(slot);
+        context.packetBroadcaster.broadcastEquipment();
+        // Start drawing for real (needs arrows, like anyone's bow).
+        if (!VanillaUse.use(context.bot.getHandle(), net.minecraft.world.InteractionHand.MAIN_HAND).used()) {
+            abort();
+            cooldown = 60;
+            return false;
         }
 
         phase = Phase.SHOOT_ARROW;
@@ -302,53 +312,55 @@ public class CartController {
     }
 
     private boolean doShootArrow(Player botPlayer, Player target) {
-        int slot = findFlameBowSlot(botPlayer);
-        if (slot < 0) slot = findSlot(botPlayer, Material.BOW);
-        if (slot < 0) {
+        net.minecraft.server.level.ServerPlayer h = context.bot.getHandle();
+        if (h == null || !h.isUsingItem()
+                || h.getUseItem().getItem() != net.minecraft.world.item.Items.BOW) {
             abort();
             cooldown = 60;
             return false;
         }
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
-        try {
-            org.bukkit.entity.Arrow arrow = botPlayer.launchProjectile(org.bukkit.entity.Arrow.class);
-            arrow.setFireTicks(200);
-            arrow.setCritical(true);
-            org.bukkit.util.Vector vel = launchVector;
-            if (vel == null) {
-                Location eye = botPlayer.getEyeLocation();
-                Location fallbackAim = railLoc.clone().add(0.5, 0.6, 0.5);
-                double h = Math.hypot(fallbackAim.getX() - eye.getX(),
-                        fallbackAim.getZ() - eye.getZ());
-                double sp = Math.max(MIN_ARROW_SPEED,
-                        Math.min(MAX_ARROW_SPEED, h / TARGET_FLIGHT_TICKS));
-                vel = computeLaunchVector(eye, fallbackAim, sp, ARROW_GRAVITY, false);
-            }
-            if (vel == null) {
-                arrow.remove();
-                abort();
-                cooldown = 60;
-                return false;
-            }
-            vel.multiply(DRAG_COMPENSATION);
-            arrow.setVelocity(vel);
-            arrow.setShooter(botPlayer);
-
-            double horiz = Math.hypot(railLoc.getX() + 0.5 - botPlayer.getLocation().getX(),
-                    railLoc.getZ() + 0.5 - botPlayer.getLocation().getZ());
-            double vxz = Math.hypot(vel.getX(), vel.getZ());
-            arrowFlightTicks = vxz < 1e-6 ? 20 : (int) Math.ceil(horiz / vxz);
-        } catch (Throwable t) {
+        org.bukkit.util.Vector vel = launchVector;
+        if (vel == null) {
+            Location eye = botPlayer.getEyeLocation();
+            Location fallbackAim = railLoc.clone().add(0.5, 0.6, 0.5);
+            double hz = Math.hypot(fallbackAim.getX() - eye.getX(),
+                    fallbackAim.getZ() - eye.getZ());
+            double sp = Math.max(MIN_ARROW_SPEED,
+                    Math.min(MAX_ARROW_SPEED, hz / TARGET_FLIGHT_TICKS));
+            vel = computeLaunchVector(eye, fallbackAim, sp, ARROW_GRAVITY, false);
+        }
+        if (vel == null) {
+            h.stopUsingItem();
             abort();
             cooldown = 60;
             return false;
         }
+        vel = vel.clone().multiply(DRAG_COMPENSATION);
 
-        context.bot.getHandle().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
+        // The arrow's speed is set by how long the bow is drawn (vanilla:
+        // power = (t^2 + 2t) / 3 for t = ticks / 20, speed = 3 * power), so
+        // hold the draw exactly as long as this shot's speed needs.
+        double speed = Math.min(3.0, vel.length());
+        double power = speed / 3.0;
+        int drawNeeded = (int) Math.ceil(20.0 * (-1.0 + Math.sqrt(1.0 + 3.0 * power)));
+        if (h.getTicksUsingItem() < Math.max(3, drawNeeded)) {
+            stepTimer = 1;
+            return true;
+        }
+
+        // Face exactly along the shot and let go.
+        float yaw = (float) Math.toDegrees(Math.atan2(-vel.getX(), vel.getZ()));
+        float pitch = (float) Math.toDegrees(-Math.atan2(vel.getY(), Math.hypot(vel.getX(), vel.getZ())));
+        VanillaUse.face(context, h, yaw, pitch);
+        h.releaseUsingItem();
+        context.packetBroadcaster.broadcastEntityData();
+
+        double horiz = Math.hypot(railLoc.getX() + 0.5 - botPlayer.getLocation().getX(),
+                railLoc.getZ() + 0.5 - botPlayer.getLocation().getZ());
+        double vxz = Math.hypot(vel.getX(), vel.getZ());
+        arrowFlightTicks = vxz < 1e-6 ? 20 : (int) Math.ceil(horiz / vxz);
+
 
         phase = Phase.PLACE_RAIL;
         stepTimer = Math.max(0, Math.min(SHOOT_DELAY, arrowFlightTicks - 4));
@@ -368,28 +380,20 @@ public class CartController {
             return false;
         }
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
+        // A crossbow being charged gets let go first - that's what loads it.
+        if (!finishLoadingCrossbow()) {
+            stepTimer = 1;
+            return true;
+        }
 
-        org.bukkit.block.BlockState replaced = railLoc.getBlock().getState();
-        railLoc.getBlock().setType(Material.RAIL, false);
-
-        org.bukkit.event.block.BlockPlaceEvent event =
-                new org.bukkit.event.block.BlockPlaceEvent(
-                        railLoc.getBlock(), replaced, railLoc.getBlock().getRelative(org.bukkit.block.BlockFace.DOWN),
-                        botPlayer.getInventory().getItem(slot), botPlayer, true,
-                        org.bukkit.inventory.EquipmentSlot.HAND);
-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled() || !event.canBuild()) {
-            replaced.update(true, false);
+        if (slot > 8) slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == Material.RAIL);
+        Block railBlock = railLoc.getBlock();
+        if (slot < 0 || slot > 8 || !VanillaWorld.place(context, botPlayer, slot, railBlock,
+                railBlock.getRelative(org.bukkit.block.BlockFace.DOWN), null)) {
             abort();
             cooldown = 100;
             return false;
         }
-
-        consumeOne(botPlayer, slot);
-        context.bot.getHandle().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
 
         phase = Phase.PLACE_CART;
         stepTimer = PLACE_DELAY;
@@ -407,23 +411,30 @@ public class CartController {
             return false;
         }
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
-        try {
-            cart = railLoc.getWorld().spawn(
-                    railLoc.clone().add(0.5, 0.1, 0.5),
-                    org.bukkit.entity.minecart.ExplosiveMinecart.class);
-            ownCart = cart;
-            ownCartTicks = OWN_CART_MEMORY;
-        } catch (Throwable t) {
+        // Right click the TNT minecart onto the rail - vanilla spawns it.
+        if (slot > 8) slot = context.inventoryController.ensureInHotbar(botPlayer,
+                it -> it.getType() == Material.TNT_MINECART);
+        if (slot < 0 || slot > 8 || !VanillaWorld.useOn(context, botPlayer, slot, railLoc.getBlock(),
+                org.bukkit.block.BlockFace.UP)) {
             abort();
             cooldown = 60;
             return false;
         }
-
-        consumeOne(botPlayer, slot);
-        context.bot.getHandle().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
+        cart = null;
+        for (org.bukkit.entity.Entity e : railLoc.getWorld().getNearbyEntities(
+                railLoc.clone().add(0.5, 0.3, 0.5), 1.2, 1.2, 1.2)) {
+            if (e instanceof org.bukkit.entity.minecart.ExplosiveMinecart m) {
+                cart = m;
+                break;
+            }
+        }
+        if (cart == null) {
+            abort();
+            cooldown = 60;
+            return false;
+        }
+        ownCart = cart;
+        ownCartTicks = OWN_CART_MEMORY;
 
         if (usingCrossbow) {
             phase = Phase.BACK_UP;
@@ -444,10 +455,23 @@ public class CartController {
             return false;
         }
 
+        if (slot > 8) slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == Material.CROSSBOW);
+        if (slot < 0 || slot > 8) {
+            abort();
+            cooldown = 60;
+            return false;
+        }
         botPlayer.getInventory().setHeldItemSlot(slot);
         context.packetBroadcaster.broadcastEquipment();
-
-        context.bot.getHandle().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
+        // Start charging it for real (needs arrows); an already loaded one
+        // is good to go.
+        net.minecraft.server.level.ServerPlayer xh = context.bot.getHandle();
+        if (!net.minecraft.world.item.CrossbowItem.isCharged(xh.getMainHandItem())
+                && !VanillaUse.use(xh, net.minecraft.world.InteractionHand.MAIN_HAND).used()) {
+            abort();
+            cooldown = 60;
+            return false;
+        }
 
         Block spot = findRailSpot(botPlayer, target);
         if (spot == null) {
@@ -508,12 +532,14 @@ public class CartController {
             return true;
         }
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
+        // Light it with a real flint-and-steel click on the floor's top
+        // face (vanilla places the fire and wears the flint and steel).
         Block flameBlock = flameLoc.getBlock();
-        if (flameBlock.getType().isAir()) {
-            flameBlock.setType(Material.FIRE, true);
+        if (slot > 8) slot = context.inventoryController.ensureInHotbar(botPlayer,
+                it -> it.getType() == Material.FLINT_AND_STEEL);
+        if (flameBlock.getType().isAir() && slot >= 0 && slot <= 8) {
+            VanillaWorld.useOn(context, botPlayer, slot, flameBlock.getRelative(org.bukkit.block.BlockFace.DOWN),
+                    org.bukkit.block.BlockFace.UP);
         }
         if (flameBlock.getType() != Material.FIRE) {
             flameLoc = null;
@@ -521,9 +547,6 @@ public class CartController {
             stepTimer = 1;
             return true;
         }
-
-        damageItem(botPlayer, slot, 1);
-        context.bot.getHandle().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
 
         phase = Phase.SHOOT_XBOW;
         stepTimer = PLACE_DELAY;
@@ -576,32 +599,29 @@ public class CartController {
             return false;
         }
 
-        botPlayer.getInventory().setHeldItemSlot(slot);
-        context.packetBroadcaster.broadcastEquipment();
-
-        Location aim = cart.getLocation().clone().add(0, 0.2, 0);
-        context.movementController.lookAt(aim, 0.0);
-
-        try {
-            org.bukkit.entity.Arrow arrow = botPlayer.launchProjectile(org.bukkit.entity.Arrow.class);
-            Location eye = botPlayer.getEyeLocation();
-            org.bukkit.util.Vector vel = computeLaunchVector(eye, aim, 3.15, 0.05);
-            if (vel == null) {
-                org.bukkit.util.Vector dir = aim.toVector().subtract(eye.toVector()).normalize();
-                vel = dir.multiply(3.15);
-            }
-
-            arrow.setVelocity(vel);
-            arrow.setShooter(botPlayer);
-            arrow.setCritical(true);
-        } catch (Throwable t) {
+        if (slot > 8) slot = context.inventoryController.ensureInHotbar(botPlayer, it -> it.getType() == Material.CROSSBOW);
+        if (slot < 0 || slot > 8) {
             abort();
             cooldown = 60;
             return false;
         }
+        botPlayer.getInventory().setHeldItemSlot(slot);
+        context.packetBroadcaster.broadcastEquipment();
 
-        context.bot.getHandle().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
-        context.packetBroadcaster.broadcastAnimation(context.bot.getHandle(), 0);
+        // Fire the loaded crossbow for real, aimed along the solved arc.
+        Location aim = cart.getLocation().clone().add(0, 0.2, 0);
+        Location eye = botPlayer.getEyeLocation();
+        org.bukkit.util.Vector vel = computeLaunchVector(eye, aim, 3.15, 0.05);
+        if (vel == null) vel = aim.toVector().subtract(eye.toVector()).normalize().multiply(3.15);
+        float yaw = (float) Math.toDegrees(Math.atan2(-vel.getX(), vel.getZ()));
+        float pitch = (float) Math.toDegrees(-Math.atan2(vel.getY(), Math.hypot(vel.getX(), vel.getZ())));
+        net.minecraft.server.level.ServerPlayer sh = context.bot.getHandle();
+        if (!net.minecraft.world.item.CrossbowItem.isCharged(sh.getMainHandItem())
+                || !VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) {
+            abort();
+            cooldown = 60;
+            return false;
+        }
 
         abort();
         cooldown = context.settings.getCartCooldownTicks();
@@ -748,32 +768,24 @@ public class CartController {
         });
     }
 
-    private void consumeOne(Player p, int slot) {
-        ItemStack it = p.getInventory().getItem(slot);
-        if (it == null) return;
-        if (it.getAmount() <= 1) p.getInventory().setItem(slot, null);
-        else {
-            it.setAmount(it.getAmount() - 1);
-            p.getInventory().setItem(slot, it);
-        }
-        p.updateInventory();
-    }
-
-    private void damageItem(Player p, int slot, int amount) {
+    // Let go of a crossbow that's been held long enough to load (vanilla
+    // loads it on release). False = still charging.
+    private boolean finishLoadingCrossbow() {
+        net.minecraft.server.level.ServerPlayer h = context.bot.getHandle();
+        if (h == null || !h.isUsingItem()) return true;
+        net.minecraft.world.item.ItemStack using = h.getUseItem();
+        if (using.getItem() != net.minecraft.world.item.Items.CROSSBOW) return true;
+        int quick = 0;
         try {
-            ItemStack it = p.getInventory().getItem(slot);
-            if (it == null) return;
-            if (it.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable d) {
-                d.setDamage(d.getDamage() + amount);
-                it.setItemMeta(d);
-                if (d.getDamage() >= it.getType().getMaxDurability()) {
-                    p.getInventory().setItem(slot, null);
-                } else {
-                    p.getInventory().setItem(slot, it);
-                }
-                p.updateInventory();
-            }
+            quick = org.bukkit.craftbukkit.inventory.CraftItemStack.asBukkitCopy(using)
+                    .getEnchantmentLevel(org.bukkit.enchantments.Enchantment.QUICK_CHARGE);
         } catch (Throwable ignored) {
         }
+        int charge = Math.max(0, 25 - 5 * quick);
+        if (h.getTicksUsingItem() < charge) return false;
+        h.releaseUsingItem();
+        context.packetBroadcaster.broadcastEntityData();
+        return true;
     }
+
 }
