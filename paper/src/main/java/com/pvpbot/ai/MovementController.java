@@ -1783,12 +1783,12 @@ public class MovementController {
         if (botPlayer == null || handle == null) return;
 
         if (leader.getWorld() != botPlayer.getWorld()) {
-            Location rejoin = leader.getLocation().clone().add(
-                    (Math.random() - 0.5) * 4.0, 0, (Math.random() - 0.5) * 4.0);
+            // The leader went to another dimension: no teleporting after
+            // them - wait right here until they're back in this world.
             context.currentPath.clear();
             context.pathNodeIndex = 0;
             context.followHolding = false;
-            context.bot.teleportTo(rejoin);
+            handleIdleHold();
             return;
         }
 
@@ -1902,7 +1902,9 @@ public class MovementController {
         if (botPlayer == null || handle == null || slot == null) return;
 
         if (slot.getWorld() != botPlayer.getWorld()) {
-            context.bot.teleportTo(slot);
+            // Formation leader in another dimension: hold here instead of
+            // teleporting after them.
+            handleIdleHold();
             return;
         }
 
