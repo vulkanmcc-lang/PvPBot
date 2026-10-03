@@ -1706,7 +1706,8 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
         if (!botManager.factionExists(factionName)) { unknownFaction(sender, botManager, factionName); return; }
 
         FormationManager.Shape shape = FormationManager.Shape.GRID;
-        boolean instant = true;
+        // Bots walk into formation unless "instant" / "tp" is asked for.
+        boolean instant = false;
         double spacing = FormationManager.DEFAULT_SPACING;
         boolean modeGiven = false;
         boolean followLeader = false;

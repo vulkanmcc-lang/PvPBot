@@ -235,13 +235,14 @@ public final class FormationManager {
         return moved;
     }
 
+    // Bots walk to their grid slots (no teleporting).
     public static int arrangeGrid(List<PvPBot> bots, Location anchor, double spacing) {
         List<Location> slots = computeGrid(anchor, bots.size(), spacing);
         int moved = 0;
         for (int i = 0; i < bots.size() && i < slots.size(); i++) {
             PvPBot bot = bots.get(i);
             if (bot == null || !bot.isAlive()) continue;
-            bot.teleportTo(slots.get(i));
+            bot.orderToFormationSlot(slots.get(i));
             moved++;
         }
         return moved;
