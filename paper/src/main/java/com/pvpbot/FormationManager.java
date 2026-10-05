@@ -71,6 +71,10 @@ public final class FormationManager {
     private FormationManager() {}
 
     public static List<Location> computeGrid(Location anchor, int count, double spacing) {
+        return fitted(anchor, Shape.GRID, count, spacing);
+    }
+
+    private static List<Location> computeGridRaw(Location anchor, int count, double spacing) {
         List<Location> slots = new ArrayList<>(Math.max(count, 0));
         if (count <= 0 || anchor.getWorld() == null) return slots;
         if (spacing <= 0.25) spacing = DEFAULT_SPACING;
@@ -105,7 +109,11 @@ public final class FormationManager {
     }
 
     public static List<Location> compute(Location anchor, Shape shape, int count, double spacing) {
-        if (shape == null || shape == Shape.GRID) return computeGrid(anchor, count, spacing);
+        return fitted(anchor, shape == null ? Shape.GRID : shape, count, spacing);
+    }
+
+    private static List<Location> computeRaw(Location anchor, Shape shape, int count, double spacing) {
+        if (shape == null || shape == Shape.GRID) return computeGridRaw(anchor, count, spacing);
         List<Location> slots = new ArrayList<>(Math.max(count, 0));
         if (count <= 0 || anchor.getWorld() == null) return slots;
         if (spacing <= 0.25) spacing = DEFAULT_SPACING;
@@ -219,6 +227,138 @@ public final class FormationManager {
             slots.add(new Location(anchor.getWorld(), x, y, z, facingYaw, 0.0f));
         }
         return slots;
+    }
+
+    // ---------------------------------------------------------------------
+    // Fitting a formation into the real terrain.
+    //
+    // The shapes are laid out as if the ground were flat and open; in a
+    // corridor, a cave or a cramped base most of those slots land inside a
+    // wall or on the far side of one, and the bot sent there never arrives.
+    // Every slot is moved to the nearest free cell a bot can actually stand
+    // in AND walk to from the anchor (a flood fill over standable cells),
+    // so in tight spaces the formation squeezes into whatever room there is.
+    // Escorts recompute their slots every tick for every member, so the
+    // result is cached for half a second per anchor/shape/size.
+    // ---------------------------------------------------------------------
+
+    private static final int FIT_CACHE_TICKS = 10;
+    private static final int FIT_MAX_CELLS = 6000;
+    private static final java.util.Map<String, Object[]> FIT_CACHE = new java.util.HashMap<>();
+
+    private static List<Location> fitted(Location anchor, Shape shape, int count, double spacing) {
+        List<Location> out = new ArrayList<>();
+        if (count <= 0 || anchor == null || anchor.getWorld() == null) return out;
+        int now = org.bukkit.Bukkit.getCurrentTick();
+        String key = anchor.getWorld().getName() + ':' + anchor.getBlockX() + ':' + anchor.getBlockY() + ':'
+                + anchor.getBlockZ() + ':' + Math.round(normalizeYaw(anchor.getYaw()) / 15f) + ':' + shape + ':'
+                + count + ':' + Math.round(spacing * 10);
+        Object[] hit = FIT_CACHE.get(key);
+        if (hit != null && now - (int) hit[0] <= FIT_CACHE_TICKS) {
+            @SuppressWarnings("unchecked")
+            List<Location> cached = (List<Location>) hit[1];
+            for (Location l : cached) out.add(l.clone());
+            return out;
+        }
+        if (FIT_CACHE.size() > 256) FIT_CACHE.entrySet().removeIf(e -> now - (int) e.getValue()[0] > FIT_CACHE_TICKS);
+
+        List<Location> raw = computeRaw(anchor, shape, count, spacing);
+        List<Location> fit = fitToTerrain(anchor, raw);
+        FIT_CACHE.put(key, new Object[]{now, fit});
+        for (Location l : fit) out.add(l.clone());
+        return out;
+    }
+
+    private static long cellKey(int x, int y, int z) {
+        return ((long) (x & 0x3FFFFFF) << 38) | ((long) (z & 0x3FFFFFF) << 12) | (y & 0xFFF);
+    }
+
+    private static List<Location> fitToTerrain(Location anchor, List<Location> raw) {
+        World w = anchor.getWorld();
+        int ax = anchor.getBlockX(), az = anchor.getBlockZ();
+        int ay = Integer.MIN_VALUE;
+        for (int d = 0; d <= 3 && ay == Integer.MIN_VALUE; d++) {
+            if (isStandable(w, ax, anchor.getBlockY() - d, az)) ay = anchor.getBlockY() - d;
+            else if (d > 0 && isStandable(w, ax, anchor.getBlockY() + d, az)) ay = anchor.getBlockY() + d;
+        }
+        if (ay == Integer.MIN_VALUE) return raw; // anchor in the air / in a block: leave it be
+
+        double reach = 6;
+        for (Location l : raw) reach = Math.max(reach, Math.hypot(l.getX() - anchor.getX(), l.getZ() - anchor.getZ()) + 4);
+        double reachSq = Math.min(reach, 40) * Math.min(reach, 40);
+
+        // Flood fill: every standable cell walkable from the anchor.
+        java.util.Set<Long> reachable = new java.util.HashSet<>();
+        List<int[]> cells = new ArrayList<>();
+        java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
+        queue.add(new int[]{ax, ay, az});
+        reachable.add(cellKey(ax, ay, az));
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        // Nearest cells come first (breadth-first), so ~10 per bot is plenty
+        // of room to choose from - and keeps a moving leader's refit cheap.
+        int cellBudget = Math.min(FIT_MAX_CELLS, Math.max(96, raw.size() * 10));
+        while (!queue.isEmpty() && cells.size() < cellBudget) {
+            int[] c = queue.poll();
+            cells.add(c);
+            for (int[] d : dirs) {
+                int nx = c[0] + d[0], nz = c[2] + d[1];
+                double ddx = nx + 0.5 - anchor.getX(), ddz = nz + 0.5 - anchor.getZ();
+                if (ddx * ddx + ddz * ddz > reachSq) continue;
+                // Same level, a step up (needs head room), or a drop of up to 3.
+                for (int ny : new int[]{c[1], c[1] + 1, c[1] - 1, c[1] - 2, c[1] - 3}) {
+                    if (ny > c[1] && !w.getBlockAt(c[0], c[1] + 2, c[2]).isPassable()) continue;
+                    if (!isStandable(w, nx, ny, nz)) continue;
+                    if (reachable.add(cellKey(nx, ny, nz))) queue.add(new int[]{nx, ny, nz});
+                    break;
+                }
+            }
+        }
+
+        java.util.Set<Long> taken = new java.util.HashSet<>();
+        taken.add(cellKey(ax, ay, az)); // nobody stands in the leader
+        List<Location> out = new ArrayList<>(raw.size());
+        for (Location slot : raw) {
+            int sx = slot.getBlockX(), sz = slot.getBlockZ(), sy = slot.getBlockY();
+            int[] pick = null;
+            // Nearest free reachable cell around where the slot wanted to be.
+            outer:
+            for (int r = 0; r <= 4; r++) {
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue;
+                        for (int dy : new int[]{0, -1, 1, -2, 2, -3, 3}) {
+                            long k = cellKey(sx + dx, sy + dy, sz + dz);
+                            if (reachable.contains(k) && !taken.contains(k)) {
+                                pick = new int[]{sx + dx, sy + dy, sz + dz};
+                                break outer;
+                            }
+                        }
+                    }
+                }
+            }
+            if (pick == null) {
+                // Nothing near it (inside a wall, past the end of a tunnel):
+                // the closest free reachable cell anywhere.
+                double best = Double.MAX_VALUE;
+                for (int[] c : cells) {
+                    long k = cellKey(c[0], c[1], c[2]);
+                    if (taken.contains(k)) continue;
+                    double dx = c[0] + 0.5 - slot.getX(), dz = c[2] + 0.5 - slot.getZ(), dy = c[1] - slot.getY();
+                    double dd = dx * dx + dz * dz + dy * dy * 4;
+                    if (dd < best) {
+                        best = dd;
+                        pick = c;
+                    }
+                }
+            }
+            if (pick == null) {
+                out.add(slot.clone()); // more bots than room: share the spot
+                continue;
+            }
+            taken.add(cellKey(pick[0], pick[1], pick[2]));
+            out.add(new Location(w, pick[0] + 0.5, pick[1], pick[2] + 0.5, slot.getYaw(), slot.getPitch()));
+        }
+        return out;
     }
 
     public static int arrange(List<PvPBot> bots, Location anchor, Shape shape,

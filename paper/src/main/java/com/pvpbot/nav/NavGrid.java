@@ -334,7 +334,47 @@ public final class NavGrid {
         return blocked * CLEARANCE_COST;
     }
 
-    public static final double CLEARANCE_COST = 0.12;
+    // Per wall side touching the cell at body height. High enough that in
+    // open ground a route a block off the wall wins over one scraping along
+    // it (bots kept hugging walls with 0.12), still uniform in a 1-wide
+    // corridor so it never changes which corridor is taken.
+    public static final double CLEARANCE_COST = 0.35;
+
+    // How many sides of this cell have a wall at body height.
+    public int wallSides(int x, int y, int z) {
+        int blocked = 0;
+        for (int[] d : CARDINALS) {
+            int ax = x + d[0], az = z + d[1];
+            if (solid(ax, y, az) || solid(ax, y + 1, az)) blocked++;
+        }
+        return blocked;
+    }
+
+    // Wall contact along the straight line from (x1,y1,z1) to (x2,y2,z2):
+    // the sum of wallSides over the cells it passes. Used to keep path
+    // shortcuts from pulling the route back against walls and corners.
+    public int lineWallContact(int x1, int y1, int z1, int x2, int y2, int z2) {
+        int dx = x2 - x1, dz = z2 - z1;
+        double ax = x1 + 0.5, az = z1 + 0.5, bx = x2 + 0.5, bz = z2 + 0.5;
+        int samples = Math.max(2, (int) Math.ceil(Math.sqrt((double) dx * dx + (double) dz * dz) / 0.25));
+        int prevY = y1, prevCx = x1, prevCz = z1;
+        int contact = wallSides(x1, y1, z1);
+        for (int i = 1; i <= samples; i++) {
+            double t = (double) i / samples;
+            int cx = (int) Math.floor(ax + (bx - ax) * t);
+            int cz = (int) Math.floor(az + (bz - az) * t);
+            if (cx == prevCx && cz == prevCz) continue;
+            int foundY = prevY;
+            for (int yy = prevY + 1; yy >= prevY - 1; yy--) {
+                if (standable(cx, yy, cz)) { foundY = yy; break; }
+            }
+            contact += wallSides(cx, foundY, cz);
+            prevY = foundY;
+            prevCx = cx;
+            prevCz = cz;
+        }
+        return contact;
+    }
 
     private CellCostMap cellCosts;
 

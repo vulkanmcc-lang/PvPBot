@@ -173,10 +173,19 @@ public final class Pathfinder {
             int limit = Math.min(path.size() - 1, i + 8);
             for (int j = limit; j > i + 1; j--) {
                 Step a = path.get(i), b = path.get(j);
-                if (grid.walkableLine(a.x, a.y, a.z, b.x, b.y, b.z)) {
-                    furthest = j;
-                    break;
+                if (!grid.walkableLine(a.x, a.y, a.z, b.x, b.y, b.z)) continue;
+                // Only cut the corner if the straight line keeps at least
+                // the clearance the planned route had - otherwise smoothing
+                // drags the bot right back along the wall the planner just
+                // paid to stay off.
+                int routeContact = 0;
+                for (int k = i; k <= j; k++) {
+                    Step s = path.get(k);
+                    routeContact += grid.wallSides(s.x, s.y, s.z);
                 }
+                if (grid.lineWallContact(a.x, a.y, a.z, b.x, b.y, b.z) > routeContact) continue;
+                furthest = j;
+                break;
             }
             out.add(path.get(furthest));
             i = furthest;

@@ -314,6 +314,9 @@ public class HazardController {
         if (maceCounterCooldown > 0) maceCounterCooldown--;
         if (maceScanCooldown > 0) maceScanCooldown--;
         if (counterTarget != null) return continueCounterDraw(botPlayer);
+        // Nobody on the server is in the air with a mace: nothing to counter
+        // (this one check replaces a bots x bots x players scan).
+        if (airborneMaceUsers().isEmpty()) return false;
 
         if (maceCounterCooldown > 0) return false;
         if (context.eating || context.drinkingPotionTimer > 0 || context.fleeing) return false;
@@ -360,27 +363,44 @@ public class HazardController {
     private Player findMaceThreatTo(Player victim) {
         if (victim == null) return null;
         Location vLoc = victim.getLocation();
-        com.pvpbot.perf.PlayerSnapshot.WorldView view =
-                com.pvpbot.perf.PlayerSnapshot.forWorld(victim.getWorld());
         double vx = vLoc.getX(), vy = vLoc.getY(), vz = vLoc.getZ();
 
-        for (int i = 0; i < view.count; i++) {
-            Player p = view.players[i];
-            if (p == null || p == victim) continue;
+        for (Player p : airborneMaceUsers()) {
+            if (p == victim || p.getWorld() != victim.getWorld()) continue;
             if (isFriendly(p)) continue;
-            if (!InventoryController.carriesMace(p)) continue;
-
-            double dxa = view.x[i] - vx, dza = view.z[i] - vz;
+            Location l = p.getLocation();
+            double dxa = l.getX() - vx, dza = l.getZ() - vz;
             if (dxa * dxa + dza * dza > MACE_THREAT_HORIZ * MACE_THREAT_HORIZ) continue;
-
-            double above = view.y[i] - vy;
+            double above = l.getY() - vy;
             if (above < 1.0 || above > MACE_THREAT_VERT) continue;
-
-            if (p.isOnGround()) continue;
-
             return p;
         }
         return null;
+    }
+
+    // Everyone on the server who is off the ground with a mace on them,
+    // worked out once per tick for all bots. Whether a player carries a mace
+    // (a 36-slot inventory scan) is remembered for a second.
+    private static int airborneTick = Integer.MIN_VALUE;
+    private static final java.util.List<Player> AIRBORNE_MACE = new java.util.ArrayList<>();
+    private static final java.util.Map<java.util.UUID, long[]> CARRIES_MACE = new java.util.HashMap<>();
+
+    static java.util.List<Player> airborneMaceUsers() {
+        int now = org.bukkit.Bukkit.getCurrentTick();
+        if (now == airborneTick) return AIRBORNE_MACE;
+        airborneTick = now;
+        AIRBORNE_MACE.clear();
+        if (now % 200 == 0) CARRIES_MACE.keySet().removeIf(id -> org.bukkit.Bukkit.getPlayer(id) == null);
+        for (Player p : org.bukkit.Bukkit.getOnlinePlayers()) {
+            if (p.isOnGround() || p.isDead()) continue;
+            long[] memo = CARRIES_MACE.get(p.getUniqueId());
+            if (memo == null || now - memo[0] > 20) {
+                memo = new long[]{now, InventoryController.carriesMace(p) ? 1 : 0};
+                CARRIES_MACE.put(p.getUniqueId(), memo);
+            }
+            if (memo[1] == 1) AIRBORNE_MACE.add(p);
+        }
+        return AIRBORNE_MACE;
     }
 
     private static boolean isSlowFallingArrow(ItemStack it) {

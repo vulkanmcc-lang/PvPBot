@@ -1325,6 +1325,8 @@ public class MovementController {
     // (shorter stall tolerance, allowed to interrupt melee).
     // =====================================================================
 
+    private int holeSearchCooldown = 0;
+
     public boolean handleHoleEscape(Player botPlayer) {
         ServerPlayer handle = context.bot.getHandle();
         if (botPlayer == null || handle == null) return false;
@@ -1348,12 +1350,20 @@ public class MovementController {
         context.aimLockedOnTarget = false;
 
         Location target = context.holeEscapeTarget;
-        if (target == null || target.getWorld() == null || target.getWorld() != loc.getWorld()
-                || target.distanceSquared(loc) < 0.25 || !isEscapeStandable(target)) {
+        if (holeSearchCooldown > 0) holeSearchCooldown--;
+        boolean stale = target == null || target.getWorld() == null || target.getWorld() != loc.getWorld()
+                || target.distanceSquared(loc) < 0.25 || !isEscapeStandable(target);
+        // The exit search reads thousands of blocks: at most once a second
+        // when it came up empty, twice a second otherwise - it used to rerun
+        // every tick for every bot that felt boxed in.
+        if (stale && holeSearchCooldown <= 0) {
             target = findHoleEscapeTarget(botPlayer);
             context.holeEscapeTarget = target;
             context.currentPath.clear();
             context.pathNodeIndex = 0;
+            holeSearchCooldown = target == null ? 20 : 10;
+        } else if (stale) {
+            target = null;
         }
 
         if (target != null) {
@@ -1515,8 +1525,12 @@ public class MovementController {
 
         Location best = null;
         double bestScore = Double.NEGATIVE_INFINITY;
+        int bestRing = Integer.MAX_VALUE;
 
         for (int r = 1; r <= HOLE_ESCAPE_SEARCH_RADIUS; r++) {
+            // Closer exits always score better than far ones a couple of
+            // rings out - stop looking once that's settled.
+            if (best != null && r > bestRing + 2) break;
             for (int dy = 0; dy <= HOLE_ESCAPE_SEARCH_UP; dy++) {
                 int y = baseY + dy;
                 for (int dx = -r; dx <= r; dx++) {
@@ -1545,6 +1559,7 @@ public class MovementController {
                         if (score > bestScore) {
                             bestScore = score;
                             best = new Location(w, x + 0.5, y + 0.1, z + 0.5);
+                            bestRing = Math.min(bestRing, r);
                         }
                     }
                 }
@@ -1631,6 +1646,13 @@ public class MovementController {
         Block ground = w.getBlockAt(x, baseY - 1, z);
         if (feet.getType().isSolid() || head.getType().isSolid() || !ground.getType().isSolid()) return false;
 
+        // Something solid right overhead: indoors, a cave, under a tree or
+        // a ledge - not a pit to climb out of. (Corridors and rooms used to
+        // look like pits, sending every bot in them into the exit search.)
+        for (int up = 2; up <= 5; up++) {
+            if (w.getBlockAt(x, baseY + up, z).getType().isSolid()) return false;
+        }
+
         int wallCount = 0;
         if (isFullBlock(w.getBlockAt(x + 1, baseY, z))) wallCount++;
         if (isFullBlock(w.getBlockAt(x - 1, baseY, z))) wallCount++;
@@ -1647,7 +1669,14 @@ public class MovementController {
         int visibleRim = 0;
         for (int dx = -HOLE_DETECTION_RADIUS; dx <= HOLE_DETECTION_RADIUS; dx++) {
             for (int dz = -HOLE_DETECTION_RADIUS; dz <= HOLE_DETECTION_RADIUS; dz++) {
-                int top = w.getHighestBlockYAt(x + dx, z + dz);
+                // Local wall height (up to 5 above our feet), not the
+                // world's highest block - a roof or a tree canopy isn't a
+                // pit wall.
+                int top = baseY - 1;
+                for (int up = 0; up < 5; up++) {
+                    if (!w.getBlockAt(x + dx, baseY + up, z + dz).getType().isSolid()) break;
+                    top = baseY + up;
+                }
                 if (top > highestSurface) highestSurface = top;
 
                 int manhattan = Math.abs(dx) + Math.abs(dz);
