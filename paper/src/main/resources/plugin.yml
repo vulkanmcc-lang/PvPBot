@@ -1,0 +1,18 @@
+name: PvPBot
+version: 1.1.5
+main: com.pvpbot.PvPBotPlugin
+api-version: '1.21'
+depend:
+  - voicechat
+commands:
+  pvpbot:
+    permission: pvpbot.admin
+    description: PvP Bot commands
+    usage: /pvpbot <spawn|masspawn|portals|settings|remove|removeall|list|difficulty|kit|faction|give|farm|checkchest> - see /pvpbot for full syntax
+permissions:
+  pvpbot.admin:
+    description: Access to all PvPBot commands
+    default: op
+  pvpbot.voice:
+    description: Give your faction's bots orders by voice with the PvPBot Voice Link client mod (only works for faction leaders; revoke to block someone)
+    default: true

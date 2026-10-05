@@ -1,0 +1,56 @@
+plugins {
+    id 'fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    maven {
+        name = 'henkelmax'
+        url = 'https://maven.maxhenkel.de/repository/public'
+    }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // Simple Voice Chat is a separate mod the player installs; we only
+    // compile against its API.
+    compileOnly "de.maxhenkel.voicechat:voicechat-api:${project.voicechat_api_version}"
+
+    // Offline speech recognition. Bundled inside our jar; its JNA dependency
+    // is already on Minecraft's classpath, so it's deliberately not bundled.
+    implementation "com.alphacephei:vosk:${project.vosk_version}"
+    include "com.alphacephei:vosk:${project.vosk_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+    from("../LICENSE") {
+        rename { "LICENSE_${project.archives_base_name}" }
+    }
+}

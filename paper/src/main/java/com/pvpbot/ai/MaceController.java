@@ -1,0 +1,1098 @@
+package com.pvpbot.ai;
+
+import net.minecraft.server.level.ServerPlayer;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.util.Vector;
+
+import java.util.concurrent.ThreadLocalRandom;
+
+public class MaceController {
+    private final BotAIContext context;
+
+    private static final float MIN_SMASH_FALL = 1.6f;
+
+    // Blocks of fall the bot sets up for (a ledge, or room under the roof
+    // for a wind-charge hop). Smashes count from 1.5 blocks of fall.
+    private static final int MIN_SMASH_HEIGHT = 3;
+
+    // Open air straight above the head, up to 12.
+    private static int headroom(Player botPlayer) {
+        Location l = botPlayer.getLocation();
+        org.bukkit.World w = l.getWorld();
+        int x = l.getBlockX(), z = l.getBlockZ(), y = l.getBlockY() + 2;
+        int n = 0;
+        while (n < 12 && !w.getBlockAt(x, y + n, z).getType().isSolid()) n++;
+        return n;
+    }
+
+    // The smash bonus comes from the fall, not the swing charge (vanilla adds
+    // the mace's fall damage on top of the charge-scaled base), and the
+    // charge restarts the moment the mace is pulled out mid-launch. Waiting
+    // for a full bar meant sailing past the target - swing as soon as the
+    // base hit is worth something.
+    private static final float SMASH_CHARGE = 0.30f;
+
+    private static final float SALVAGE_CHARGE = 0.0f;
+
+    private static final int ATTEMPT_TIMEOUT = 80;
+
+    private static final int ELYTRA_ATTEMPT_TIMEOUT = 240;
+
+    private static final int CHAIN_TIMEOUT = 70;
+
+    private static final int MAX_CHAIN_HITS = 4;
+
+    // Wind charges recharge in half a second: good players are back in the
+    // air right after landing.
+    private static final int SMASH_COOLDOWN = 26;
+    private static final int ABORT_COOLDOWN = 14;
+    private static final int STUN_SLAM_COOLDOWN = 44;
+
+    private static final int STUN_SLAM_PHASE_DURATION = 70;
+
+    private static final int STUN_SLAM_FOLLOW_TICKS = 1;
+
+    private static final int STUN_SLAM_MAX_WAIT = 24;
+
+    private static final int STUN_SLAM_MAX_SWINGS = 8;
+
+    private static final int SLAM_STALL_TICKS = 12;
+
+    private static final double STUN_SLAM_CHANCE = 0.85;
+
+    private static final double SETUP_RANGE = 6.0;
+
+    private static final double ELYTRA_MIN_RANGE = 10.0;
+    private static final double ELYTRA_MAX_RANGE = 40.0;
+
+    // Per-tick chance to take an open launch (a clean drop onto the target
+    // is always taken).
+    private static final double OPPORTUNITY_CHANCE = 0.55;
+
+    // Wind charge fired at the ground just behind the bot (away from the
+    // target) instead of straight down: the blast throws it up AND toward
+    // the target, the way players open a mace combo.
+    private static final double WIND_PUSH_MIN_GAP = 2.2;
+    private static final double WIND_PUSH_TILT = 0.42;
+
+    private enum Launch { NONE, HEIGHT, WIND_CHARGE, ELYTRA, PEARL }
+
+    private enum ElytraPhase { NONE, CLIMB, ALIGN, DIVE, FALL }
+
+    private static final double ELYTRA_CLIMB_HEIGHT = 20.0;
+    private static final double ELYTRA_RELEASE_RANGE = 6.0;
+    private static final int ELYTRA_ALIGN_TICKS = 8;
+
+    // Floor between rockets when the rocket entity couldn't be tracked
+    // (a flight-1 rocket burns ~20-30 ticks).
+    private static final int ELYTRA_ROCKET_INTERVAL = 22;
+
+    private static final double PEARL_GRAPPLE_MIN_HEIGHT = 4.0;
+    private static final double PEARL_GRAPPLE_MAX_HEIGHT = 30.0;
+    private static final double PEARL_GRAPPLE_RANGE = 18.0;
+    private static final double PEARL_GRAPPLE_LEAD = 1.5;
+    private static final int PEARL_GRAPPLE_COOLDOWN = 120;
+
+    private static final int LAUNCH_GRACE_TICKS = 6;
+
+    private static final int MAX_ROCKETS_PER_RUN = 5;
+
+
+    private static final float ELYTRA_CLIMB_PITCH = -70.0f;
+
+    private Launch activeLaunch = Launch.NONE;
+    private ElytraPhase elytraPhase = ElytraPhase.NONE;
+    private int elytraPhaseTicks = 0;
+    private int rocketCooldown = 0;
+    private int chainsUsed = 0;
+    private int rocketsUsed = 0;
+    private String stunGate = "-";
+    private String p1Landed = "-";
+    private boolean slamLaunched = false;
+    private int slamDrivenTick = Integer.MIN_VALUE;
+    private int slamWaitTicks = 0;
+    private int slamSwingRetries = 0;
+    // The rocket currently pulling us (null once it burns out).
+    private org.bukkit.entity.Projectile activeRocket = null;
+
+    public MaceController(BotAIContext context) {
+        this.context = context;
+    }
+
+    public int findBestMaceSlot(Player p) {
+        return context.inventoryController.findBestMaceSlot(p);
+    }
+
+    public boolean hasMace(Player botPlayer) {
+        return findBestMaceSlot(botPlayer) >= 0;
+    }
+
+    public boolean isAttempting() {
+        return context.maceWindupTicks > 0;
+    }
+
+    public void tick() {
+        if (context.maceStunSlamPhase > 0) {
+            Player stuck = context.bot.getBukkitPlayer();
+            String abort = null;
+            if (context.fleeing) abort = "slam aborted: fleeing";
+            else if (context.eating || context.drinkingPotionTimer > 0) {
+                abort = "slam aborted: consuming";
+            } else if (!TargetFilter.isEngageable(context.target, stuck)) {
+                abort = "slam aborted: target lost";
+            } else if (context.tickCounter - slamDrivenTick > SLAM_STALL_TICKS) {
+                abort = "slam aborted: stalled";
+            }
+            if (abort != null) {
+                context.maceStunSlamPhase = 0;
+                context.maceStunSlamPhaseTicks = 0;
+                context.maceStunSlamCooldown = 20;
+                context.maceHoldAfterAttack = 0;
+                slamLaunched = false;
+                slamWaitTicks = 0;
+                slamSwingRetries = 0;
+                stunGate = abort;
+                if (stuck != null) restoreWeapon(stuck);
+                return;
+            }
+        }
+
+        if (isAttempting() && context.fleeing) {
+            Player fleeing = context.bot.getBukkitPlayer();
+            if (fleeing != null) {
+                stunGate = "aborted: fleeing";
+                cancel(fleeing);
+            }
+            return;
+        }
+
+        if (isAttempting()) return;
+        if (activeLaunch == Launch.NONE && elytraPhase == ElytraPhase.NONE) return;
+
+        Player botPlayer = context.bot.getBukkitPlayer();
+        if (botPlayer == null) return;
+
+        stunGate = "attempt expired";
+        cancel(botPlayer);
+    }
+
+    public boolean shouldHoldMace(Player botPlayer) {
+        if (!isAttempting()) return false;
+        if (findBestMaceSlot(botPlayer) < 0) return false;
+
+        ServerPlayer handle = context.bot.getHandle();
+        if (handle == null) return false;
+        if (!handle.onGround()) return true;
+
+        return launchTimeout() - context.maceWindupTicks <= LAUNCH_GRACE_TICKS;
+    }
+
+    private int launchTimeout() {
+        return activeLaunch == Launch.ELYTRA ? ELYTRA_ATTEMPT_TIMEOUT : ATTEMPT_TIMEOUT;
+    }
+
+    private void restoreWeapon(Player botPlayer) {
+        int slot = context.inventoryController.findBestWeaponSlot(botPlayer);
+        if (slot < 0 || slot > 8) return;
+        if (botPlayer.getInventory().getHeldItemSlot() == slot) return;
+        botPlayer.getInventory().setHeldItemSlot(slot);
+        context.packetBroadcaster.broadcastEquipment();
+    }
+
+    public String debugLine() {
+        return "mace=" + (isAttempting() ? activeLaunch + "/" + context.maceWindupTicks : "idle")
+                + " cd=" + context.maceWindupCooldown
+                + " slam=" + context.maceStunSlamPhase
+                + " chain=" + chainsUsed
+                + " stun=" + stunGate
+                + (elytraPhase == ElytraPhase.NONE ? "" : " ely=" + elytraPhase);
+    }
+
+
+    public boolean shouldUseMace(Player botPlayer, double distance) {
+        if (isAttempting()) return true;
+
+        if (!context.settings.isMaceSmash()) return false;
+        if (context.maceWindupCooldown > 0 || context.maceHoldAfterAttack > 0) return false;
+        if (context.maceStunSlamPhase > 0) return false;
+        if (context.fleeing || context.eating || context.drinkingPotionTimer > 0) return false;
+        if (!TargetFilter.isEngageable(context.target, botPlayer)) return false;
+        if (findBestMaceSlot(botPlayer) < 0) return false;
+
+        if (targetIsBlocking()) {
+            return false;
+        }
+
+        ServerPlayer handle = context.bot.getHandle();
+        if (handle == null) return false;
+
+        if (!handle.onGround()
+                && handle.getDeltaMovement().y < 0.0
+                && handle.fallDistance > MIN_SMASH_FALL
+                && distance <= SETUP_RANGE) {
+            return true;
+        }
+
+        if (!handle.onGround()) {
+            return handle.fallDistance > MIN_SMASH_FALL && distance <= SETUP_RANGE;
+        }
+        Launch launch = chooseLaunch(botPlayer, handle, distance);
+        if (launch == Launch.NONE) return false;
+        if (launch == Launch.HEIGHT) return true;
+
+        return ThreadLocalRandom.current().nextDouble() < OPPORTUNITY_CHANCE;
+    }
+
+    private Launch chooseLaunch(Player botPlayer, ServerPlayer handle, double distance) {
+        Player target = context.target;
+        if (target == null) return Launch.NONE;
+
+        double drop = botPlayer.getLocation().getY() - target.getLocation().getY();
+        double flat = Math.hypot(target.getLocation().getX() - botPlayer.getLocation().getX(),
+                target.getLocation().getZ() - botPlayer.getLocation().getZ());
+
+        // Any drop of 3+ onto them is a smash (more than 1.5 blocks of fall is
+        // all the mace needs) - step off the ledge, no need to be right on
+        // top of them.
+        if (distance <= SETUP_RANGE && drop >= 2.0) return Launch.HEIGHT;
+        if (drop >= MIN_SMASH_HEIGHT && flat <= 4.0) return Launch.HEIGHT;
+
+        // A wind charge only has to throw us 3 blocks up: fine in a cave with
+        // a low roof, pointless under a 2-high ceiling.
+        if (distance <= SETUP_RANGE && headroom(botPlayer) >= MIN_SMASH_HEIGHT
+                && context.inventoryController.findWindChargeSlot(botPlayer) >= 0) {
+            return Launch.WIND_CHARGE;
+        }
+
+        double above = target.getLocation().getY() - botPlayer.getLocation().getY();
+        if (above >= PEARL_GRAPPLE_MIN_HEIGHT
+                && above <= PEARL_GRAPPLE_MAX_HEIGHT
+                && distance <= PEARL_GRAPPLE_RANGE
+                && context.pearlCooldown <= 0
+                && context.inventoryController.findItemSlot(
+                        botPlayer, Material.ENDER_PEARL) >= 0) {
+            return Launch.PEARL;
+        }
+
+        if (context.settings.isElytraMacing()
+                && distance >= ELYTRA_MIN_RANGE && distance <= ELYTRA_MAX_RANGE
+                && context.inventoryController.findElytraSlot(botPlayer) != -1
+                && context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET) >= 0) {
+            return Launch.ELYTRA;
+        }
+
+        return Launch.NONE;
+    }
+
+
+    public void handleMaceWindup(Player botPlayer, double distance) {
+        ServerPlayer handle = context.bot.getHandle();
+        if (handle == null) return;
+
+        if (!TargetFilter.isEngageable(context.target, botPlayer)) {
+            cancel(botPlayer);
+            return;
+        }
+
+        if (!isAttempting()) {
+            beginAttempt(botPlayer, handle, distance);
+            return;
+        }
+
+
+        equipMace(botPlayer);
+        // Keep the sprint: sprinting in the air steers ~30% harder, which is
+        // what gets the bot on top of a moving target.
+        context.suppressSprint = false;
+        aimAtTarget(handle);
+        steerToTarget(handle);
+
+        if (activeLaunch == Launch.ELYTRA) driveElytra(botPlayer, handle, distance);
+    }
+
+    private void beginAttempt(Player botPlayer, ServerPlayer handle, double distance) {
+        chainsUsed = 0;
+        Launch launch = chooseLaunch(botPlayer, handle, distance);
+
+        if (launch == Launch.NONE) {
+            if (handle.onGround() || handle.fallDistance <= MIN_SMASH_FALL) {
+                cancel(botPlayer);
+                return;
+            }
+        }
+
+        switch (launch) {
+            case WIND_CHARGE -> {
+                if (!launchWithWindCharge(botPlayer, handle)) {
+                    cancel(botPlayer);
+                    return;
+                }
+            }
+            case HEIGHT -> {
+                steerToTarget(handle);
+                context.movementController.requestJump();
+            }
+            case ELYTRA -> {
+                if (!launchWithElytra(botPlayer, handle)) {
+                    cancel(botPlayer);
+                    return;
+                }
+            }
+            case PEARL -> {
+                if (!launchWithPearl(botPlayer, handle)) {
+                    cancel(botPlayer);
+                    return;
+                }
+            }
+            default -> { }
+        }
+
+        activeLaunch = launch;
+        if (!equipMace(botPlayer)) {
+            cancel(botPlayer);
+            return;
+        }
+        context.maceWindupTicks = launch == Launch.ELYTRA
+                ? ELYTRA_ATTEMPT_TIMEOUT : ATTEMPT_TIMEOUT;
+    }
+
+    private boolean launchWithWindCharge(Player botPlayer, ServerPlayer handle) {
+        int slot = context.inventoryController.findWindChargeSlot(botPlayer);
+        if (slot < 0 || slot > 8) return false;
+
+        if (VanillaUse.coolingDown(botPlayer, slot)) return false;
+        context.movementController.requestJump();
+
+        // Straight down, or tilted back from the target so the blast also
+        // carries the bot toward them.
+        Vector shot = new Vector(0, -1, 0);
+        Player target = context.target;
+        if (target != null && target.getWorld() == botPlayer.getWorld()) {
+            double gx = target.getLocation().getX() - handle.getX();
+            double gz = target.getLocation().getZ() - handle.getZ();
+            double gap = Math.hypot(gx, gz);
+            if (gap > WIND_PUSH_MIN_GAP) {
+                double tilt = WIND_PUSH_TILT * Math.min(1.0, (gap - WIND_PUSH_MIN_GAP) / 2.5 + 0.35);
+                shot = new Vector(-gx / gap * tilt, -1, -gz / gap * tilt);
+            }
+        }
+        shot.normalize();
+        float shotPitch = (float) Math.toDegrees(Math.asin(-shot.getY()));
+        float shotYaw = shot.getX() == 0 && shot.getZ() == 0 ? handle.getYRot()
+                : (float) Math.toDegrees(Math.atan2(-shot.getX(), shot.getZ()));
+        // A real right click: vanilla speed and spread, and the half-second
+        // wind charge cooldown (no more back-to-back charges).
+        return VanillaUse.useFromHotbar(context, botPlayer, slot, shotYaw, shotPitch).used();
+    }
+
+    private boolean launchWithPearl(Player botPlayer, ServerPlayer handle) {
+        Player target = context.target;
+        if (target == null) return false;
+
+        int slot = context.inventoryController.findItemSlot(botPlayer, Material.ENDER_PEARL);
+        if (slot < 0 || slot > 8) return false;
+
+        int previousSlot = botPlayer.getInventory().getHeldItemSlot();
+
+        Location eye = botPlayer.getEyeLocation();
+        Location aim = target.getLocation().clone().add(0.0, PEARL_GRAPPLE_LEAD, 0.0);
+
+        double dx = aim.getX() - eye.getX();
+        double dy = aim.getY() - eye.getY();
+        double dz = aim.getZ() - eye.getZ();
+        double flat = Math.sqrt(dx * dx + dz * dz);
+
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.1, flat)));
+
+        if (!VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch).used()) {
+            if (botPlayer.getInventory().getHeldItemSlot() != previousSlot) {
+                botPlayer.getInventory().setHeldItemSlot(previousSlot);
+                context.packetBroadcaster.broadcastEquipment();
+            }
+            return false;
+        }
+        context.pearlCooldown = PEARL_GRAPPLE_COOLDOWN;
+        return true;
+    }
+
+    private boolean launchWithElytra(Player botPlayer, ServerPlayer handle) {
+        if (!hasRocket(botPlayer)) return false;
+        if (!context.inventoryController.equipElytraForMace(botPlayer)) return false;
+
+        // Jump now; the glide opens on a second jump press once airborne
+        // (ensureGliding), like a player double-tapping space.
+        context.movementController.requestJump();
+
+        elytraPhase = ElytraPhase.CLIMB;
+        elytraPhaseTicks = 0;
+        rocketCooldown = 0;
+        rocketsUsed = 0;
+        activeRocket = null;
+        return true;
+    }
+
+    private void driveElytra(Player botPlayer, ServerPlayer handle, double distance) {
+        Player target = context.target;
+        if (target == null) return;
+
+        if (rocketCooldown > 0) rocketCooldown--;
+        if (activeRocket != null && !activeRocket.isValid()) activeRocket = null;
+        elytraPhaseTicks++;
+
+        double above = handle.getY() - target.getLocation().getY();
+
+        switch (elytraPhase) {
+            case CLIMB -> {
+                if (!ensureGliding(botPlayer, handle)) {
+                    if (elytraPhaseTicks > 20) cancel(botPlayer);
+                    return;
+                }
+                if (above < ELYTRA_CLIMB_HEIGHT) {
+                    float[] climb = climbAim(handle);
+                    boostRocket(botPlayer, handle, climb[0], climb[1]);
+                    return;
+                }
+                stopGliding(botPlayer, true);
+                elytraPhase = ElytraPhase.ALIGN;
+                elytraPhaseTicks = 0;
+            }
+            case ALIGN -> {
+                aimAtTarget(handle);
+                // Still going up (the Wind Burst bounce, or the climb's
+                // momentum): wait for the top before diving.
+                if (elytraPhaseTicks < ELYTRA_ALIGN_TICKS || handle.getDeltaMovement().y > 0.05) return;
+
+                if (!context.inventoryController.equipElytraForMace(botPlayer)) {
+                    cancel(botPlayer);
+                    return;
+                }
+                // Opening the glide needs us off the ground - landed during
+                // the align means the dive is off.
+                if (!VanillaUse.startGlide(handle)) {
+                    cancel(botPlayer);
+                    return;
+                }
+                elytraPhase = ElytraPhase.DIVE;
+                elytraPhaseTicks = 0;
+            }
+            case DIVE -> {
+                if (!ensureGliding(botPlayer, handle)) {
+                    elytraPhase = ElytraPhase.FALL;
+                    equipMace(botPlayer);
+                    return;
+                }
+                aimAtTarget(handle);
+
+                if (distance <= ELYTRA_RELEASE_RANGE || above <= 4.0) {
+                    stopGliding(botPlayer, true);
+                    equipMace(botPlayer);
+                    elytraPhase = ElytraPhase.FALL;
+                    elytraPhaseTicks = 0;
+                    return;
+                }
+
+                // A rocket pulls along the look direction, so look where we
+                // want to go - straight at them.
+                float[] dive = anglesTo(handle, target.getLocation().clone().add(0, 1.0, 0));
+                boostRocket(botPlayer, handle, dive[0], dive[1]);
+            }
+            case FALL -> {
+                equipMace(botPlayer);
+            }
+            default -> { }
+        }
+    }
+
+    private boolean hasRocket(Player botPlayer) {
+        return context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET) >= 0;
+    }
+
+    // A real firework rocket: right click it mid-glide and the rocket entity
+    // pulls the bot along wherever it's looking for its whole flight, exactly
+    // like a player's boost. The next one goes up once it has burned out.
+    private void boostRocket(Player botPlayer, ServerPlayer handle, float yaw, float pitch) {
+        if (!handle.isFallFlying()) return;
+        if (rocketCooldown > 0 || activeRocket != null) return;
+        if (rocketsUsed >= MAX_ROCKETS_PER_RUN) return;
+
+        int slot = context.inventoryController.findItemSlot(botPlayer, Material.FIREWORK_ROCKET);
+        if (slot < 0 || slot > 8) return;
+
+        VanillaUse.Result r = VanillaUse.useFromHotbar(context, botPlayer, slot, yaw, pitch);
+        if (!r.used()) return;
+        activeRocket = r.projectile();
+        rocketsUsed++;
+        rocketCooldown = ELYTRA_ROCKET_INTERVAL;
+    }
+
+    // {yaw, pitch} for the climb: steep up, heading their way.
+    private float[] climbAim(ServerPlayer handle) {
+        Player target = context.target;
+        float yaw = handle.getYRot();
+        if (target != null) {
+            double dx = target.getLocation().getX() - handle.getX();
+            double dz = target.getLocation().getZ() - handle.getZ();
+            if (dx * dx + dz * dz > 1.0E-6) yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        }
+        // Above the windup's aim-at-target: the rocket pulls along the look,
+        // so the climb has to actually be looking up.
+        context.requestLook(yaw, ELYTRA_CLIMB_PITCH, BotAIContext.LOOK_CRITICAL + 1, false);
+        return new float[]{yaw, ELYTRA_CLIMB_PITCH};
+    }
+
+    private static float[] anglesTo(ServerPlayer handle, Location at) {
+        double dx = at.getX() - handle.getX();
+        double dy = at.getY() - (handle.getY() + handle.getEyeHeight());
+        double dz = at.getZ() - handle.getZ();
+        double flat = Math.sqrt(dx * dx + dz * dz);
+        return new float[]{
+                (float) Math.toDegrees(Math.atan2(-dx, dz)),
+                (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.1, flat)))};
+    }
+
+    // Keep the glide going; if it dropped, press jump again in mid-air like
+    // a player would. On the ground the jump comes first (the glide opens
+    // next tick). False = not gliding this tick.
+    private boolean ensureGliding(Player botPlayer, ServerPlayer handle) {
+        if (handle.isFallFlying()) return true;
+        if (!context.elytraEquippedForMace
+                && !context.inventoryController.equipElytraForMace(botPlayer)) return false;
+        if (handle.onGround()) {
+            context.movementController.requestJump();
+            return false;
+        }
+        return VanillaUse.startGlide(handle);
+    }
+
+    // Players can't just stop gliding - they swap the elytra off (hotbar
+    // chestplate swap), and the glide ends the moment it's gone.
+    private void stopGliding(Player botPlayer, boolean unequip) {
+        if (unequip) context.inventoryController.unequipElytraForMace(botPlayer);
+    }
+
+
+    public void handleMaceAttack(Player botPlayer, double distance) {
+        if (!isAttempting()) return;
+
+        ServerPlayer handle = context.bot.getHandle();
+        if (handle == null) return;
+
+        Player target = context.target;
+        if (!TargetFilter.isEngageable(target, botPlayer)) {
+            cancel(botPlayer);
+            return;
+        }
+
+        boolean elytraMidRun = activeLaunch == Launch.ELYTRA
+                && elytraPhase != ElytraPhase.NONE
+                && elytraPhase != ElytraPhase.FALL;
+        if (!elytraMidRun && handle.onGround()
+                && context.maceWindupTicks < launchTimeout() - LAUNCH_GRACE_TICKS) {
+            cancel(botPlayer);
+            return;
+        }
+
+        if (handle.isFallFlying()) return;
+        if (handle.fallDistance <= MIN_SMASH_FALL) return;
+        if (handle.getDeltaMovement().y >= 0.0) return;
+
+        if (targetIsBlocking()
+                && context.inventoryController.findBestAxeSlot(botPlayer) >= 0) {
+            if (context.combatController.reachDistance(handle, target)
+                    <= context.settings.getReach() + 0.35) {
+                int axeSlot = context.inventoryController.findBestAxeSlot(botPlayer);
+                if (axeSlot >= 0 && axeSlot <= 8) {
+                    botPlayer.getInventory().setHeldItemSlot(axeSlot);
+                    context.packetBroadcaster.broadcastEquipment();
+                    if (handle.isUsingItem()) handle.stopUsingItem();
+
+                    context.ignoreSwingCharge = true;
+                    boolean broke;
+                    try {
+                        broke = context.combatController.performAttack(botPlayer, false);
+                    } finally {
+                        context.ignoreSwingCharge = false;
+                    }
+                    stunGate = broke ? "mid-dive shield break" : "mid-dive break refused";
+                    equipMace(botPlayer);
+                }
+            }
+            return;
+        }
+
+        if (context.combatController.reachDistance(handle, target)
+                > context.settings.getReach()) {
+            return;
+        }
+
+        float charge = handle.getAttackStrengthScale(0.0f);
+        boolean lastChance = aboutToLand(botPlayer);
+        if (charge < SMASH_CHARGE && !(lastChance && charge >= SALVAGE_CHARGE)) return;
+
+        handle.setSprinting(false);
+        context.suppressSprint = true;
+
+        boolean hit;
+        context.ignoreSwingCharge = true;
+        try {
+            hit = context.combatController.performAttack(botPlayer, false);
+        } finally {
+            context.ignoreSwingCharge = false;
+        }
+        if (!hit) return;
+
+        finish(botPlayer);
+    }
+
+    private boolean aboutToLand(Player botPlayer) {
+        Location loc = botPlayer.getLocation();
+        org.bukkit.World world = loc.getWorld();
+        if (world == null) return true;
+
+        int x = loc.getBlockX();
+        int z = loc.getBlockZ();
+        int y = (int) Math.floor(loc.getY());
+        for (int dy = 1; dy <= 2; dy++) {
+            if (world.getBlockAt(x, y - dy, z).getType().isSolid()) return true;
+        }
+        return false;
+    }
+
+
+    private void aimAtTarget(ServerPlayer handle) {
+        Player target = context.target;
+        if (target == null) return;
+
+        Location eye = target.getEyeLocation();
+        double dx = eye.getX() - handle.getX();
+        double dy = eye.getY() - (handle.getY() + handle.getEyeHeight());
+        double dz = eye.getZ() - handle.getZ();
+        double flat = Math.sqrt(dx * dx + dz * dz);
+
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float) Math.toDegrees(-Math.atan2(dy, Math.max(0.1, flat)));
+
+        context.requestLook(yaw, pitch, BotAIContext.LOOK_CRITICAL, false);
+    }
+
+    private void steerToTarget(ServerPlayer handle) {
+        Player target = context.target;
+        if (target == null) return;
+
+        Location tl = target.getLocation();
+
+        Vector v = target.getVelocity();
+        double airTicks = Math.min(12.0, Math.max(0.0, -handle.getDeltaMovement().y) * 8.0);
+        double tx = tl.getX() + v.getX() * airTicks;
+        double tz = tl.getZ() + v.getZ() * airTicks;
+
+        double dx = tx - handle.getX();
+        double dz = tz - handle.getZ();
+
+        if (dx * dx + dz * dz < 0.04) {
+            context.forwardInput = 0f;
+            context.strafeInput = 0f;
+            return;
+        }
+        context.movementController.worldDirToInputs(handle, dx, dz, 1.0f);
+    }
+
+
+    public boolean targetIsBlocking() {
+        Player target = context.target;
+        return InventoryController.isBlockingWithShield(target);
+    }
+
+    public boolean shouldAttemptStunSlam(Player botPlayer, double distance) {
+        if (!context.settings.isMaceSmash()) { stunGate = "macesmash off"; return false; }
+        if (context.maceStunSlamCooldown > 0) {
+            stunGate = "cooldown " + context.maceStunSlamCooldown;
+            return false;
+        }
+        if (isAttempting()) { stunGate = "mace run active"; return false; }
+
+        ServerPlayer launchCheck = context.bot.getHandle();
+        if (launchCheck == null) return false;
+
+        boolean alreadyFalling = !launchCheck.onGround()
+                && launchCheck.getDeltaMovement().y < 0.0;
+        if (!alreadyFalling
+                && context.inventoryController.findWindChargeSlot(botPlayer) < 0) {
+            stunGate = "no wind charge and not falling";
+            return false;
+        }
+
+        if (context.target == null) { stunGate = "no target"; return false; }
+        if (!InventoryController.isBlockingWithShield(context.target)) {
+            stunGate = InventoryController.holdsShield(context.target)
+                    ? "has shield but not blocking" : "target has no shield";
+            return false;
+        }
+
+        double swingRange = context.settings.getReach() + 0.35;
+
+        int spearForReach = context.inventoryController.findSpearSlot(botPlayer);
+        if (spearForReach >= 0) {
+            double spearReach = CombatController.attackMaxRangeOf(
+                    botPlayer.getInventory().getItem(spearForReach));
+            if (spearReach > 0.0) swingRange = Math.max(swingRange, spearReach + 0.35);
+        }
+
+        if (distance > swingRange) {
+            stunGate = String.format("too far (%.1f > %.1f)", distance, swingRange);
+            return false;
+        }
+
+        if (context.inventoryController.findBestAxeSlot(botPlayer) < 0) {
+            stunGate = "no axe";
+            return false;
+        }
+        if (findBestMaceSlot(botPlayer) < 0) { stunGate = "no mace"; return false; }
+
+
+        if (ThreadLocalRandom.current().nextDouble() >= STUN_SLAM_CHANCE) {
+            stunGate = "waiting on roll";
+            return false;
+        }
+        stunGate = "GO";
+        return true;
+    }
+
+    public void beginStunSlam(Player botPlayer) {
+        slamLaunched = false;
+        slamWaitTicks = 0;
+        slamSwingRetries = 0;
+        slamDrivenTick = context.tickCounter;
+        context.maceStunSlamPhase = 1;
+        context.maceStunSlamPhaseTicks = STUN_SLAM_PHASE_DURATION;
+        handleStunSlam(botPlayer);
+    }
+
+    public void abortSequences(Player botPlayer) {
+        if (context.maceStunSlamPhase > 0) {
+            context.maceStunSlamPhase = 0;
+            context.maceStunSlamPhaseTicks = 0;
+            context.maceStunSlamCooldown = 20;
+            context.maceHoldAfterAttack = 0;
+            slamLaunched = false;
+            slamWaitTicks = 0;
+            slamSwingRetries = 0;
+            stunGate = "target lost";
+        }
+        if (isAttempting()) cancel(botPlayer);
+    }
+
+    public void handleStunSlam(Player botPlayer) {
+        slamDrivenTick = context.tickCounter;
+        if (!TargetFilter.isEngageable(context.target, botPlayer)) {
+            abortSequences(botPlayer);
+            restoreWeapon(botPlayer);
+            return;
+        }
+
+        switch (context.maceStunSlamPhase) {
+            case 0 -> startStunSlam(botPlayer);
+            case 1 -> breakShieldPhase(botPlayer);
+            case 2 -> {
+                equipMace(botPlayer);
+                if (context.maceStunSlamPhaseTicks > 0) {
+                    stunGate = "P2 mace in " + context.maceStunSlamPhaseTicks;
+                    return;
+                }
+
+                ServerPlayer slamHandle = context.bot.getHandle();
+                if (slamHandle != null && context.target != null
+                        && slamWaitTicks < STUN_SLAM_MAX_WAIT) {
+                    double slamGap = context.combatController.reachDistance(
+                            slamHandle, context.target);
+                    if (slamGap > context.settings.getReach() + 0.35) {
+                        double flat = botPlayer.getLocation()
+                                .distance(context.target.getLocation());
+                        if (context.combatController.tryLungeSwap(botPlayer, flat)) {
+                            slamWaitTicks++;
+                            stunGate = String.format("P2 lunging in @%.1f", slamGap);
+                            context.maceStunSlamPhaseTicks = STUN_SLAM_FOLLOW_TICKS;
+                            return;
+                        }
+                    }
+                }
+
+                ServerPlayer smashHandle = context.bot.getHandle();
+                if (smashHandle == null) return;
+
+                boolean canSmash = !smashHandle.onGround()
+                        && smashHandle.fallDistance > MIN_SMASH_FALL;
+
+                boolean lastChance = aboutToLand(botPlayer);
+
+                // No waiting out the target's hurt-cooldown here: the axe hit
+                // landed on a raised shield, so it did 0 damage - and a hit
+                // during the cooldown still deals everything above the last
+                // hit's damage, i.e. the whole smash. Waiting only let the bot
+                // land first and lose the smash.
+                if (!canSmash && !smashHandle.onGround()
+                        && slamWaitTicks < STUN_SLAM_MAX_WAIT) {
+                    slamWaitTicks++;
+                    stunGate = String.format("P2 building fall (%.1f)",
+                            smashHandle.fallDistance);
+                    context.maceStunSlamPhaseTicks = 1;
+                    return;
+                }
+
+                if (!canSmash && smashHandle.onGround()) {
+                    endStunSlam(botPlayer, "P2 grounded, no smash - sword takes over");
+                    restoreWeapon(botPlayer);
+                    return;
+                }
+
+                context.ignoreSwingCharge = true;
+                boolean landed;
+                try {
+                    landed = context.combatController.performAttack(botPlayer, false);
+                } finally {
+                    context.ignoreSwingCharge = false;
+                }
+                if (!landed && ++slamSwingRetries < STUN_SLAM_MAX_SWINGS) {
+                    stunGate = "P2 retry " + slamSwingRetries + ": " + context.lastAttackGate;
+                    context.maceStunSlamPhaseTicks = 1;
+                    return;
+                }
+
+                endStunSlam(botPlayer,
+                        (landed ? "P2 MACE HIT" : "P2 gave up: " + context.lastAttackGate)
+                                + " [p1=" + p1Landed + " brk=" + context.lastShieldBreak + "]");
+                return;
+            }
+            default -> { }
+        }
+
+        if (context.maceStunSlamPhase == 1 && context.maceStunSlamPhaseTicks <= 0) {
+            p1Landed = "TIMEOUT";
+            endStunSlam(botPlayer, "P1 TIMED OUT (shield never broken)");
+            context.maceStunSlamCooldown = 40;
+            restoreWeapon(botPlayer);
+        }
+    }
+
+    private void endStunSlam(Player botPlayer, String why) {
+        context.maceStunSlamPhase = 0;
+        context.maceStunSlamPhaseTicks = 0;
+        context.maceStunSlamCooldown = STUN_SLAM_COOLDOWN;
+        context.maceHoldAfterAttack = 0;
+        slamLaunched = false;
+        slamWaitTicks = 0;
+        slamSwingRetries = 0;
+        stunGate = why;
+    }
+
+    private void startStunSlam(Player botPlayer) {
+        int axeSlot = context.inventoryController.findBestAxeSlot(botPlayer);
+        if (axeSlot >= 0 && axeSlot <= 8
+                && botPlayer.getInventory().getHeldItemSlot() != axeSlot) {
+            botPlayer.getInventory().setHeldItemSlot(axeSlot);
+            context.packetBroadcaster.broadcastEquipment();
+        }
+    }
+
+    private void breakShieldPhase(Player botPlayer) {
+        ServerPlayer h = context.bot.getHandle();
+        if (h == null) return;
+
+        if (!slamLaunched) {
+            if (!h.onGround()) {
+                slamLaunched = true;
+            } else if (launchWithWindCharge(botPlayer, h)) {
+                slamLaunched = true;
+                stunGate = "P1 launched";
+                context.maceStunSlamPhaseTicks = STUN_SLAM_PHASE_DURATION;
+
+                int axeNow = context.inventoryController.findBestAxeSlot(botPlayer);
+                if (axeNow >= 0 && axeNow <= 8) {
+                    botPlayer.getInventory().setHeldItemSlot(axeNow);
+                    context.packetBroadcaster.broadcastEquipment();
+                }
+                return;
+            } else {
+                stunGate = "P1 launch failed";
+                context.maceStunSlamPhase = 0;
+                context.maceStunSlamCooldown = 20;
+                return;
+            }
+        }
+
+        if (h.getDeltaMovement().y > 0.0) {
+            stunGate = "P1 rising, waiting to fall";
+            return;
+        }
+
+        ServerPlayer handle = context.bot.getHandle();
+        if (handle == null) return;
+
+        int axeSlot = context.inventoryController.findBestAxeSlot(botPlayer);
+        if (axeSlot < 0 || axeSlot > 8) return;
+        if (botPlayer.getInventory().getHeldItemSlot() != axeSlot) {
+            botPlayer.getInventory().setHeldItemSlot(axeSlot);
+            context.packetBroadcaster.broadcastEquipment();
+        }
+
+
+        if (handle.isUsingItem()) {
+            handle.stopUsingItem();
+            context.eating = false;
+            context.packetBroadcaster.broadcastEntityData();
+        }
+
+        double gap = context.combatController.reachDistance(handle, context.target);
+        if (gap > context.settings.getReach() + 0.35) {
+            int spearSlot = context.inventoryController.findSpearSlot(botPlayer);
+            double spearReach = spearSlot < 0 ? 0.0 : CombatController.attackMaxRangeOf(
+                    botPlayer.getInventory().getItem(spearSlot));
+            if (spearReach <= gap) {
+                stunGate = String.format("P1 out of reach %.1f (no spear carry)", gap);
+                return;
+            }
+            context.swingReachOverride = spearReach;
+            stunGate = String.format("P1 reach swap @%.1f", gap);
+        }
+
+        boolean swung;
+        context.ignoreSwingCharge = true;
+        try {
+            swung = context.combatController.performAttack(botPlayer, false);
+        } finally {
+            context.ignoreSwingCharge = false;
+            context.swingReachOverride = 0.0;
+        }
+
+        if (!swung) {
+            stunGate = "P1 swing refused: " + context.lastAttackGate;
+            if (context.maceStunSlamPhaseTicks <= 1) {
+                context.maceStunSlamPhase = 0;
+                context.maceStunSlamPhaseTicks = 0;
+                context.maceStunSlamCooldown = 20;
+                stunGate = "P1 gave up (never in reach)";
+            }
+            return;
+        }
+
+        stunGate = "P1 HIT -> P2";
+        p1Landed = "hit";
+        context.maceStunSlamPhase = 2;
+        context.maceStunSlamPhaseTicks = STUN_SLAM_FOLLOW_TICKS;
+        equipMace(botPlayer);
+    }
+
+
+    private boolean equipMace(Player botPlayer) {
+        int slot = findBestMaceSlot(botPlayer);
+        if (slot < 0 || slot > 8) return false;
+        if (botPlayer.getInventory().getHeldItemSlot() != slot) {
+            botPlayer.getInventory().setHeldItemSlot(slot);
+            context.packetBroadcaster.broadcastEquipment();
+        }
+        return true;
+    }
+
+    private void clearWindCharge() {
+        if (context.maceWindCharge != null) {
+            try {
+                context.maceWindCharge.remove();
+            } catch (Throwable ignored) {
+            }
+        }
+        context.maceWindCharge = null;
+        context.maceWindChargeTicks = 0;
+    }
+
+    private void restoreElytra(Player botPlayer) {
+        if (!context.elytraEquippedForMace) return;
+        context.inventoryController.unequipElytraForMace(botPlayer);
+    }
+
+    private void finish(Player botPlayer) {
+        clearWindCharge();
+
+        if (tryStartChain(botPlayer)) return;
+
+        restoreElytra(botPlayer);
+        activeLaunch = Launch.NONE;
+        elytraPhase = ElytraPhase.NONE;
+        elytraPhaseTicks = 0;
+        rocketCooldown = 0;
+        rocketsUsed = 0;
+        activeRocket = null;
+        chainsUsed = 0;
+        restoreWeapon(botPlayer);
+        context.maceWindupTicks = 0;
+        context.maceWindupDelay = 0;
+        context.maceWindupCooldown = SMASH_COOLDOWN;
+        context.maceHoldAfterAttack = 4;
+    }
+
+    private boolean tryStartChain(Player botPlayer) {
+        int windBurst = windBurstLevel(botPlayer);
+        if (windBurst <= 0) return false;
+        if (!TargetFilter.isEngageable(context.target, botPlayer)) return false;
+
+        int allowed = Math.min(MAX_CHAIN_HITS, 1 + windBurst);
+        if (chainsUsed >= allowed) return false;
+
+        chainsUsed++;
+        context.maceWindupTicks = CHAIN_TIMEOUT;
+        context.maceWindupDelay = 0;
+        context.maceHoldAfterAttack = 0;
+
+        double gap = botPlayer.getLocation().distance(context.target.getLocation());
+        boolean canFly = context.settings.isElytraMacing()
+                && hasRocket(botPlayer)
+                && context.inventoryController.findElytraSlot(botPlayer) != -1;
+
+        // Wind Burst just threw us up: with an elytra and rockets, ride that
+        // height - at the top of the bounce pop the elytra, rocket back down
+        // at them, let go close in and smash again. Without, just fall on
+        // them again.
+        if (canFly) {
+            restoreElytra(botPlayer);
+            activeLaunch = Launch.ELYTRA;
+            elytraPhase = ElytraPhase.ALIGN;
+            context.maceWindupTicks = ELYTRA_ATTEMPT_TIMEOUT;
+        } else {
+            activeLaunch = Launch.HEIGHT;
+            elytraPhase = ElytraPhase.NONE;
+        }
+        elytraPhaseTicks = 0;
+        rocketCooldown = 0;
+        rocketsUsed = 0;
+        activeRocket = null;
+
+        equipMace(botPlayer);
+        return true;
+    }
+
+    private int windBurstLevel(Player botPlayer) {
+        int slot = findBestMaceSlot(botPlayer);
+        if (slot < 0) return 0;
+        return context.inventoryController.readWindburstLevel(
+                botPlayer.getInventory().getItem(slot));
+    }
+
+    private void cancel(Player botPlayer) {
+        clearWindCharge();
+        restoreElytra(botPlayer);
+        activeLaunch = Launch.NONE;
+        elytraPhase = ElytraPhase.NONE;
+        elytraPhaseTicks = 0;
+        rocketCooldown = 0;
+        rocketsUsed = 0;
+        activeRocket = null;
+        chainsUsed = 0;
+        restoreWeapon(botPlayer);
+        context.maceWindupTicks = 0;
+        context.maceWindupDelay = 0;
+        context.maceWindupCooldown = ABORT_COOLDOWN;
+    }
+}
