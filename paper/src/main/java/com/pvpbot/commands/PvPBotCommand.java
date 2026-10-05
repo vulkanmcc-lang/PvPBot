@@ -1756,6 +1756,8 @@ public class PvPBotCommand implements CommandExecutor, TabCompleter {
                 return;
             }
             botManager.setFactionFormation(factionName, shape, spacing);
+            org.bukkit.entity.Player leaderNow = org.bukkit.Bukkit.getPlayer(botManager.getFactionLeader(factionName));
+            if (leaderNow != null) FormationManager.resetHeading(leaderNow);
             sender.sendMessage("§e" + bots.size() + "§a bots of §e" + factionName.toLowerCase()
                     + "§a will hold a §e" + shape.name().toLowerCase()
                     + "§a behind their leader.");

@@ -269,6 +269,76 @@ public final class FormationManager {
         return out;
     }
 
+    // ---------------------------------------------------------------------
+    // Which way is "behind" the leader.
+    //
+    // Using the leader's head yaw made the whole formation spin every time
+    // they looked around: say "stand behind me" and turn round to watch the
+    // army, and "behind" is now where you're looking - so the bots run
+    // through you to the far side, you turn again, and they end up in front
+    // of you most of the time. The heading is set from where the leader is
+    // facing when the order is given, and after that only follows the way
+    // they actually walk (a couple of blocks of travel roughly the way
+    // they're facing). Looking around in place never moves the formation.
+    // ---------------------------------------------------------------------
+
+    private static final double HEADING_STEP = 2.0;
+    private static final double HEADING_TELEPORT = 32.0;
+    private static final double HEADING_MAX_TURN = 100.0;
+    private static final int HEADING_STALE_TICKS = 100;
+
+    private static final class Heading {
+        float yaw;
+        double x, z;
+        java.util.UUID world;
+        int tick;
+    }
+
+    private static final java.util.Map<java.util.UUID, Heading> HEADINGS = new java.util.HashMap<>();
+
+    // Point the formation the way the leader is facing right now - called
+    // when the order is given, so "behind me" means behind where I'm looking.
+    public static void resetHeading(org.bukkit.entity.Player leader) {
+        if (leader == null) return;
+        Location l = leader.getLocation();
+        Heading h = new Heading();
+        h.yaw = normalizeYaw(l.getYaw());
+        h.x = l.getX();
+        h.z = l.getZ();
+        h.world = l.getWorld() == null ? null : l.getWorld().getUID();
+        h.tick = org.bukkit.Bukkit.getCurrentTick();
+        HEADINGS.put(leader.getUniqueId(), h);
+    }
+
+    public static float headingOf(org.bukkit.entity.Player leader) {
+        Location l = leader.getLocation();
+        int now = org.bukkit.Bukkit.getCurrentTick();
+        java.util.UUID world = l.getWorld() == null ? null : l.getWorld().getUID();
+        Heading h = HEADINGS.get(leader.getUniqueId());
+        if (h == null || now - h.tick > HEADING_STALE_TICKS || !java.util.Objects.equals(h.world, world)) {
+            resetHeading(leader);
+            return HEADINGS.get(leader.getUniqueId()).yaw;
+        }
+        if (h.tick == now) return h.yaw;
+        h.tick = now;
+        double dx = l.getX() - h.x, dz = l.getZ() - h.z;
+        double d2 = dx * dx + dz * dz;
+        if (d2 > HEADING_TELEPORT * HEADING_TELEPORT) {
+            h.yaw = normalizeYaw(l.getYaw());
+            h.x = l.getX();
+            h.z = l.getZ();
+        } else if (d2 >= HEADING_STEP * HEADING_STEP) {
+            float travel = normalizeYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
+            // Walking backwards / strafing past the army keeps the old
+            // heading - "behind" is still behind where they're looking.
+            if (Math.abs(normalizeYaw(travel - l.getYaw())) <= HEADING_MAX_TURN) h.yaw = travel;
+            h.x = l.getX();
+            h.z = l.getZ();
+        }
+        if (HEADINGS.size() > 64) HEADINGS.values().removeIf(o -> now - o.tick > HEADING_STALE_TICKS);
+        return h.yaw;
+    }
+
     private static long cellKey(int x, int y, int z) {
         return ((long) (x & 0x3FFFFFF) << 38) | ((long) (z & 0x3FFFFFF) << 12) | (y & 0xFFF);
     }
@@ -287,18 +357,31 @@ public final class FormationManager {
         for (Location l : raw) reach = Math.max(reach, Math.hypot(l.getX() - anchor.getX(), l.getZ() - anchor.getZ()) + 4);
         double reachSq = Math.min(reach, 40) * Math.min(reach, 40);
 
+        // Every shape is laid out on the anchor's forward side (for an escort
+        // that's behind the leader). Cells on the other side - in front of
+        // the leader - are only explored once the formation side is used up,
+        // so the budget isn't spent on ground nobody should stand on and a
+        // slot that has to move never jumps round in front of the leader
+        // while there's room behind them.
+        double yawRad = Math.toRadians(anchor.getYaw());
+        double fx = -Math.sin(yawRad), fz = Math.cos(yawRad);
+
         // Flood fill: every standable cell walkable from the anchor.
         java.util.Set<Long> reachable = new java.util.HashSet<>();
         List<int[]> cells = new ArrayList<>();
         java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
+        java.util.ArrayDeque<int[]> wrongSide = new java.util.ArrayDeque<>();
         queue.add(new int[]{ax, ay, az});
         reachable.add(cellKey(ax, ay, az));
         int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-        // Nearest cells come first (breadth-first), so ~10 per bot is plenty
-        // of room to choose from - and keeps a moving leader's refit cheap.
-        int cellBudget = Math.min(FIT_MAX_CELLS, Math.max(96, raw.size() * 10));
-        while (!queue.isEmpty() && cells.size() < cellBudget) {
-            int[] c = queue.poll();
+        // Nearest cells come first (breadth-first). The budget has to cover
+        // the whole half-disc the shape spans, or the back rows of a big army
+        // never get a real cell and pile up on the edge of what was searched.
+        double fillR = Math.min(reach, 40);
+        int cellBudget = Math.min(FIT_MAX_CELLS,
+                Math.max(Math.max(96, raw.size() * 10), (int) (Math.PI * fillR * fillR * 0.55)));
+        while ((!queue.isEmpty() || !wrongSide.isEmpty()) && cells.size() < cellBudget) {
+            int[] c = !queue.isEmpty() ? queue.poll() : wrongSide.poll();
             cells.add(c);
             for (int[] d : dirs) {
                 int nx = c[0] + d[0], nz = c[2] + d[1];
@@ -308,7 +391,10 @@ public final class FormationManager {
                 for (int ny : new int[]{c[1], c[1] + 1, c[1] - 1, c[1] - 2, c[1] - 3}) {
                     if (ny > c[1] && !w.getBlockAt(c[0], c[1] + 2, c[2]).isPassable()) continue;
                     if (!isStandable(w, nx, ny, nz)) continue;
-                    if (reachable.add(cellKey(nx, ny, nz))) queue.add(new int[]{nx, ny, nz});
+                    if (reachable.add(cellKey(nx, ny, nz))) {
+                        boolean front = ddx * fx + ddz * fz < -1.5;
+                        (front ? wrongSide : queue).add(new int[]{nx, ny, nz});
+                    }
                     break;
                 }
             }
@@ -345,6 +431,8 @@ public final class FormationManager {
                     if (taken.contains(k)) continue;
                     double dx = c[0] + 0.5 - slot.getX(), dz = c[2] + 0.5 - slot.getZ(), dy = c[1] - slot.getY();
                     double dd = dx * dx + dz * dz + dy * dy * 4;
+                    // In front of the leader only when there's nothing else.
+                    if ((c[0] + 0.5 - anchor.getX()) * fx + (c[2] + 0.5 - anchor.getZ()) * fz < -1.5) dd += 1.0e6;
                     if (dd < best) {
                         best = dd;
                         pick = c;

@@ -1908,6 +1908,17 @@ public class MovementController {
             return true;
         }
 
+        // The slot moves with the leader; a path planned to where it used to
+        // be (the far side of the leader before they set off) is stale - drop
+        // it rather than walk the whole thing to the wrong spot.
+        if (!context.currentPath.isEmpty() && context.pathNodeIndex < context.currentPath.size()) {
+            Location end = context.currentPath.get(context.currentPath.size() - 1);
+            if (end.getWorld() != slot.getWorld() || end.distanceSquared(slot) > 3.0 * 3.0) {
+                context.currentPath.clear();
+                context.pathNodeIndex = 0;
+            }
+        }
+
         boolean blocked = handle.horizontalCollision || !canWalkStraightTo(slot);
         boolean tooFar = distance > 16.0;
 

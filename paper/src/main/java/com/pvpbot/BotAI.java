@@ -835,8 +835,10 @@ public class BotAI {
         }
         if (index < 0) return false;
 
+        // Behind the way the leader is heading, not the way their head is
+        // turned - looking back at the army mustn't swing it round in front.
         Location anchor = leader.getLocation().clone();
-        anchor.setYaw(anchor.getYaw() + 180.0f);
+        anchor.setYaw(FormationManager.headingOf(leader) + 180.0f);
 
         List<Location> slots = FormationManager.compute(
                 anchor, order.shape(), members.size(), order.spacing());

@@ -611,6 +611,13 @@ public final class VoiceLink implements PluginMessageListener, Listener {
                     manager.setFactionFormation(f, FormationManager.Shape.GRID, FormationManager.DEFAULT_SPACING);
                 }
                 for (PvPBot b : bots) b.getAI().getContext().movementController.clearFormationOrder();
+                // "Behind me" = behind where I'm looking as I say it.
+                FormationManager.resetHeading(speaker);
+                for (String f : factions) {
+                    java.util.UUID lid = manager.getFactionLeader(f);
+                    org.bukkit.entity.Player lp = lid == null ? null : org.bukkit.Bukkit.getPlayer(lid);
+                    if (lp != null && lp != speaker) FormationManager.resetHeading(lp);
+                }
                 ok(speaker, transcript, who + " → grid formation behind you (" + bots.size()
                         + ") - \"break formation\" to release");
             }
