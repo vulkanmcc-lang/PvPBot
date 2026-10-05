@@ -246,6 +246,11 @@ public class PvPBot {
 
         getBukkitPlayer().setGameMode(org.bukkit.GameMode.SURVIVAL);
 
+        // A bot needs none of what vanilla gives a player with a screen
+        // (mob spawning, a full view distance of chunks loaded, simulated and
+        // sent to it).
+        com.pvpbot.perf.BotFootprint.apply(getBukkitPlayer());
+
         if (!com.pvpbot.ai.PacketBroadcaster.USE_VANILLA_TRACKER) {
             sendSpawnPackets();
         }

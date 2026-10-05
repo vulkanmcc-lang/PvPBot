@@ -159,6 +159,7 @@ public class PvPBotPlugin extends JavaPlugin implements Listener {
                         botManager == null ? 0 : botManager.getBots().size();
 
                 attackCoordinator.tick();
+                com.pvpbot.perf.BotFootprint.tick(botManager);
 
                 if (!buildJobs.isEmpty()) {
                     buildJobs.values().removeIf(j -> {

@@ -33,6 +33,22 @@ performance:
   # cached a little longer. Check what was picked in /pvpbot performance.
   profile: auto
 
+  # ── what each bot costs just by being a player ──
+  #
+  # Bots are real players to the server, so out of the box each one spawns
+  # mobs around itself, keeps the full view distance of chunks loaded and
+  # simulated, has every one of those chunks serialised into packets for its
+  # fake connection, and gets a move packet for every entity it can see. With
+  # 100 bots that alone eats most of the tick. Bots read the world directly,
+  # so none of it is needed. Real players still see every bot normally.
+  bot-affects-spawning: false
+  bot-view-distance: 3          # chunks kept loaded round each bot (2-32)
+  bot-simulation-distance: 2    # chunks ticked round each bot
+  bot-send-distance: 2          # chunk packets built for each bot's connection
+  # Bots on the same side don't track each other (no packets between them).
+  # Enemies stay tracked - a hidden player can't be hit by the hider's arrows.
+  hide-teammate-bots: true
+
   # Level of detail. Bots that are idle AND out of every real player's sight
   # run physics every tick but only re-run the AI decision tree every
   # `ai-lod-stride` ticks. Bots that are fighting, fleeing, escorting, hurt,
