@@ -321,8 +321,23 @@ public class InventoryController {
         return it != null && it.getType() == Material.MACE;
     }
 
+    // Whether a player has a mace anywhere on them, remembered for a second
+    // per player: it's asked by every bot about every nearby player, and a
+    // full inventory scan each time was a measurable slice of the tick.
+    private static final java.util.Map<java.util.UUID, long[]> MACE_MEMO = new java.util.HashMap<>();
+
     public static boolean carriesMace(Player p) {
         if (p == null) return false;
+        int now = org.bukkit.Bukkit.getCurrentTick();
+        long[] memo = MACE_MEMO.get(p.getUniqueId());
+        if (memo != null && now - memo[0] <= 20 && now >= memo[0]) return memo[1] == 1;
+        if (MACE_MEMO.size() > 512) MACE_MEMO.clear();
+        boolean has = scanForMace(p);
+        MACE_MEMO.put(p.getUniqueId(), new long[]{now, has ? 1 : 0});
+        return has;
+    }
+
+    private static boolean scanForMace(Player p) {
         try {
             PlayerInventory inv = p.getInventory();
             if (isMace(inv.getItemInMainHand())) return true;
